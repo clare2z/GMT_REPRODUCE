@@ -265,17 +265,35 @@ trainer = GMTTrainer(
     learning_rate=5e-5,    # 学习率
 )
 
-trainer.train(texts, num_epochs=2)
+trainer.train(texts, num_epochs=5)
 ```
 
 ## 输出示例
 
+### 训练配置信息
 ```
-2026-04-30 10:00:00,000 - INFO - 程序开始
-2026-04-30 10:00:00,001 - INFO - Initializing GMT trainer with model: distilgpt2
-2026-04-30 10:00:01,234 - INFO - Model loaded to cpu
-2026-04-30 10:00:01,235 - INFO - Starting training with 80 samples, 2 epochs
+===== Training Configuration =====
+Model: distilgpt2
+Device: cpu
+Number of samples: 80
+Number of epochs: 5
+GMT k-percent: 50%
+Gradient accumulation steps: 4
+Learning rate: 5e-05
+====================================
+```
 
+### Batch级别日志
+```
+--- Epoch 1/5 ---
+  Batch 1/20: Loss=3.2156, EnergyRetention=0.7852, MaskStability=0.6234
+  Batch 2/20: Loss=3.1823, EnergyRetention=0.7910, MaskStability=0.6512
+  Batch 3/20: Loss=3.1456, EnergyRetention=0.8023, MaskStability=0.6875
+  ...
+```
+
+### Epoch结果
+```
 === Epoch 1 ===
 Loss = 2.8567
 【指标1】梯度能量保留率 (Gradient Energy Retention): 0.7852
@@ -287,8 +305,35 @@ Loss = 2.8567
           decoder: 0.4521
           lm_head: 0.3210
           transformer: 0.2269
+```
 
-训练完成
+### 训练总结
+```
+===== Training Summary =====
+Metrics evolution across epochs:
+
+[Loss]
+  Epoch 1: 2.8567
+  Epoch 2: 2.6234
+  Epoch 3: 2.4512
+  Epoch 4: 2.3156
+  Epoch 5: 2.2034
+
+[Gradient Energy Retention]
+  Epoch 1: 0.7852
+  Epoch 2: 0.8012
+  Epoch 3: 0.8156
+  Epoch 4: 0.8234
+  Epoch 5: 0.8312
+
+[Mask Stability]
+  Epoch 1: 0.6234
+  Epoch 2: 0.6875
+  Epoch 3: 0.7234
+  Epoch 4: 0.7567
+  Epoch 5: 0.7890
+
+===== Training Completed =====
 ```
 
 ## 📄 Reference
