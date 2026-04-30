@@ -291,8 +291,12 @@ Loss = 2.8567
 训练完成
 ```
 
-## 参考文献
-[GMT: Gradient Mask Tuning for Efficient Large Model Training]
+## 📄 Reference
+
+- Li, H., Zhang, X., Liu, X., Gong, Y., Wang, Y., Chen, Q., & Cheng, P. (2025).  
+  **Enhancing Large Language Model Performance with Gradient-Based Parameter Selection**.  
+  *Proceedings of the AAAI Conference on Artificial Intelligence (AAAI 2025).*  
+  🔗 `https://arxiv.org/abs/2406.15330`
 
 ## License
 MIT License
