@@ -333,6 +333,20 @@ Metrics evolution across epochs:
   Epoch 4: 0.7567
   Epoch 5: 0.7890
 
+[Layer Update Variance]
+  Epoch 1: 0.012345
+  Epoch 2: 0.011234
+  Epoch 3: 0.010123
+  Epoch 4: 0.009012
+  Epoch 5: 0.008901
+
+[Max/Min Update Ratio]
+  Epoch 1: 3.25
+  Epoch 2: 3.12
+  Epoch 3: 2.98
+  Epoch 4: 2.85
+  Epoch 5: 2.72
+
 ===== Training Completed =====
 ```
 
