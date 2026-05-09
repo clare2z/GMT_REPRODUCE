@@ -89,7 +89,6 @@ class GMTTrainer:
             logger.info("Loaded 4-bit quantization config")
         
         self.model = AutoModelForCausalLM.from_pretrained(
-            trust_remote_code=True,
             self.model_name,
             quantization_config=quantization_config,
             device_map="auto",
