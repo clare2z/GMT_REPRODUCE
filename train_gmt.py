@@ -24,7 +24,7 @@ class GMTTrainer:
 <<<<<<< HEAD
         model_name: str = "/Data/zhengtingyu/models/Qwen-7B-Chat",
 =======
-        model_name: str = "gpt2",
+        model_name: str = "/Data/zhengtingyu/models/Qwen-7B-Chat",
 >>>>>>> 4dd147fcec415f5c543308ede507521d52e275da
         device: str = "cuda",
         k_percent: int = 50,
@@ -353,7 +353,7 @@ def main():
     logger.info("===== GMT Large Model Training =====")
     
     trainer = GMTTrainer(
-        model_name="gpt2",
+        model_name="/Data/zhengtingyu/models/Qwen-7B-Chat",
         device="cuda",
         k_percent=50,
         accumulation_steps=8,
