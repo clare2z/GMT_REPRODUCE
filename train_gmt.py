@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 class GMTTrainer:
     def __init__(
         self,
-        model_name: str = "meta-llama/Llama-2-7b-chat-hf",
+        model_name: str = "/Data/zhengtingyu/models/Qwen-7B-Chat",
         device: str = "cuda",
         k_percent: int = 50,
         accumulation_steps: int = 8,
