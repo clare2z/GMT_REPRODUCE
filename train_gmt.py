@@ -71,10 +71,13 @@ class GMTTrainer:
         logger.info(f"Learning rate: {self.learning_rate}")
         
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
-        self.tokenizer.pad_token = self.tokenizer.eos_token
         if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-            logger.info("Set pad_token to eos_token")
+            if self.tokenizer.eos_token is not None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+                logger.info("Set pad_token to eos_token")
+            else:
+                self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+                logger.info("Added [PAD] token")
         
         quantization_config = None
         if self.use_quantization and self.device == "cuda":
