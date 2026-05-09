@@ -207,7 +207,7 @@ class GMTTrainer:
         inputs = self.tokenizer(
             text,
             return_tensors="pt",
-            padding="max_length",
+            padding=False,
             truncation=True,
             max_length=128,
         )
