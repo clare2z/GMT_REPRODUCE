@@ -72,7 +72,8 @@ class GMTTrainer:
         logger.info(f"Gradient accumulation steps: {self.accumulation_steps}")
         logger.info(f"Learning rate: {self.learning_rate}")
         
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
+        self.tokenizer.pad_token = self.tokenizer.eos_token
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
             logger.info("Set pad_token to eos_token")
@@ -88,6 +89,7 @@ class GMTTrainer:
             logger.info("Loaded 4-bit quantization config")
         
         self.model = AutoModelForCausalLM.from_pretrained(
+            trust_remote_code=True,
             self.model_name,
             quantization_config=quantization_config,
             device_map="auto",
