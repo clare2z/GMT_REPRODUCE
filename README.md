@@ -253,33 +253,60 @@ pip install torch transformers numpy
 python train_gmt.py
 ```
 
-### 自定义配置
+### 自定义配置（小模型）
 ```python
 from train_gmt import GMTTrainer
 
 trainer = GMTTrainer(
     model_name="distilgpt2",
-    device="cpu",           # "cpu" or "cuda"
-    k_percent=50,          # 保留前k%重要参数
-    accumulation_steps=4,  # 累积N个batch后更新
-    learning_rate=5e-5,    # 学习率
+    device="cpu",
+    k_percent=50,
+    accumulation_steps=4,
+    learning_rate=5e-5,
+    use_quantization=False,
 )
 
 trainer.train(texts, num_epochs=5)
 ```
 
+### 自定义配置（大模型）
+```python
+from train_gmt import GMTTrainer
+
+trainer = GMTTrainer(
+    model_name="meta-llama/Llama-2-7b-chat-hf",
+    device="cuda",
+    k_percent=50,
+    accumulation_steps=8,
+    learning_rate=2e-5,
+    use_quantization=True,
+    load_in_4bit=True,
+    num_epochs=3,
+)
+
+trainer.train(texts)
+```
+
+## 推荐模型
+
+| 模型 | 参数 | 所需显存 | 特点 |
+|------|------|---------|------|
+| `meta-llama/Llama-2-7b-chat-hf` | 7B | ~13GB (4-bit) | 最流行，社区支持好 |
+| `Qwen/Qwen-7B-Chat` | 7B | ~13GB (4-bit) | 中文支持优秀 |
+| `mistralai/Mistral-7B-v0.3` | 7B | ~13GB (4-bit) | 速度快，效率高 |
+| `meta-llama/Llama-2-13b-chat-hf` | 13B | ~24GB (4-bit) | 效果更好 |
+
 ## 输出示例
 
 ### 训练配置信息
 ```
-===== Training Configuration =====
-Model: distilgpt2
-Device: cpu
-Number of samples: 80
-Number of epochs: 5
+===== Initializing GMT Trainer =====
+Model: meta-llama/Llama-2-7b-chat-hf
+Device: cuda
+Quantization: 4-bit
 GMT k-percent: 50%
-Gradient accumulation steps: 4
-Learning rate: 5e-05
+Gradient accumulation steps: 8
+Learning rate: 2e-05
 ====================================
 ```
 
