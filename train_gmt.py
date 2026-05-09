@@ -24,8 +24,6 @@ class GMTTrainer:
 
         model_name: str = "/Data/zhengtingyu/models/Qwen-7B-Chat",
 
-        model_name: str = "/Data/zhengtingyu/models/Qwen-7B-Chat",
-
         device: str = "cuda",
         k_percent: int = 50,
         accumulation_steps: int = 8,
