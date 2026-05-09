@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 class GMTTrainer:
     def __init__(
         self,
-        model_name: str = "meta-llama/Llama-2-7b-chat-hf",
+        model_name: str = "gpt2",
         device: str = "cuda",
         k_percent: int = 50,
         accumulation_steps: int = 8,
@@ -349,13 +349,13 @@ def main():
     logger.info("===== GMT Large Model Training =====")
     
     trainer = GMTTrainer(
-        model_name="meta-llama/Llama-2-7b-chat-hf",
+        model_name="gpt2",
         device="cuda",
         k_percent=50,
         accumulation_steps=8,
         learning_rate=2e-5,
-        use_quantization=True,
-        load_in_4bit=True,
+        use_quantization=False,
+        load_in_4bit=False,
         num_epochs=3,
     )
     
