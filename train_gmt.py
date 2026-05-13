@@ -87,7 +87,7 @@ class GMTTrainer:
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
             quantization_config=quantization_config,
-            device_map="auto",
+            device_map="cuda:0",
             torch_dtype=torch.bfloat16,
             trust_remote_code=True
         )
