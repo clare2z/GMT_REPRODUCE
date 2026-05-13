@@ -22,7 +22,7 @@ class GMTTrainer:
     def __init__(
         self,
 
-        model_name: str = "gpt2",
+        model_name: str = "/Data/zhengtingyu/models/gpt2",
 
         device: str = "cuda",
         k_percent: int = 50,
@@ -70,7 +70,7 @@ class GMTTrainer:
         logger.info(f"Gradient accumulation steps: {self.accumulation_steps}")
         logger.info(f"Learning rate: {self.learning_rate}")
         
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         self.tokenizer.pad_token = self.tokenizer.eos_token
         logger.info("Set pad_token to eos_token")
         
@@ -350,7 +350,7 @@ def main():
     logger.info("===== GMT Large Model Training =====")
     
     trainer = GMTTrainer(
-        model_name="gpt2",
+        model_name="/Data/zhengtingyu/models/gpt2",
         device="cuda",
         k_percent=50,
         accumulation_steps=8,
