@@ -350,7 +350,7 @@ def main():
     logger.info("===== GMT Large Model Training =====")
     
     trainer = GMTTrainer(
-        model_name="/Data/zhengtingyu/models/Qwen-7B-Chat",
+        model_name="gpt2",
         device="cuda",
         k_percent=50,
         accumulation_steps=8,
