@@ -22,13 +22,13 @@ class GMTTrainer:
     def __init__(
         self,
 
-        model_name: str = "/Data/zhengtingyu/models/Qwen-7B-Chat",
+        model_name: str = "gpt2",
 
         device: str = "cuda",
         k_percent: int = 50,
         accumulation_steps: int = 8,
         learning_rate: float = 2e-5,
-        use_quantization: bool = True,
+        use_quantization: bool = False,
         load_in_4bit: bool = True,
         num_epochs: int = 3,
     ) -> None:
