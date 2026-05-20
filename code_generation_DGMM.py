@@ -280,7 +280,7 @@ def preprocess_dataset(dataset, tokenizer, max_length=512):
 
 
 def create_dataloader(dataset, batch_size=4):
-    dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
+    dataset.set_format(type="torch", columns=["labels", "attention_mask"])
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
     return dataloader
 
