@@ -12,6 +12,13 @@ from datasets import load_dataset
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# 本地路径配置
+LOCAL_PATHS = {
+    "mistralai/Mistral-7B-v0.1": "/autodl-tmp/model/Mistral-7B-v0.1",
+    "deepseek-ai/DeepSeek-Coder-Base-6.7B": "/autodl-tmp/model/DeepSeek-Coder-Base-6.7B",
+    "dataset": "/autodl-tmp/dataset/Magicoder-Evol-Instruct-110K"
+}
+
 
 class GradientEncoder(nn.Module):
     def __init__(self, input_dim: int = 128, hidden_dim: int = 128, output_dim: int = 64):
@@ -243,8 +250,13 @@ class DGMMTrainer:
 
 
 def load_magicoder_dataset():
-    logger.info("Loading Magicoder-Evol-Instruct-110K dataset...")
-    dataset = load_dataset("ise-uiuc/Magicoder-Evol-Instruct-110K", split="train")
+    logger.info("Loading Magicoder-Evol-Instruct-110K dataset from local path...")
+    dataset_path = LOCAL_PATHS["dataset"]
+    if os.path.exists(dataset_path):
+        dataset = load_dataset(dataset_path, split="train")
+    else:
+        logger.info(f"Local path not found: {dataset_path}, downloading from Hugging Face...")
+        dataset = load_dataset("ise-uiuc/Magicoder-Evol-Instruct-110K", split="train")
     logger.info(f"Dataset loaded with {len(dataset)} samples")
     return dataset
 
@@ -276,6 +288,15 @@ def create_dataloader(dataset, batch_size=4):
 def load_model(model_name, device="cuda", use_quantization=True):
     logger.info(f"Loading model: {model_name}")
 
+    # 检查本地路径
+    local_path = LOCAL_PATHS.get(model_name)
+    if local_path and os.path.exists(local_path):
+        model_path = local_path
+        logger.info(f"Using local model path: {model_path}")
+    else:
+        model_path = model_name
+        logger.info(f"Local path not found, using Hugging Face: {model_path}")
+
     quantization_config = None
     if use_quantization and device == "cuda":
         quantization_config = BitsAndBytesConfig(
@@ -285,12 +306,12 @@ def load_model(model_name, device="cuda", use_quantization=True):
             bnb_4bit_compute_dtype=torch.bfloat16
         )
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     model = AutoModelForCausalLM.from_pretrained(
-        model_name,
+        model_path,
         quantization_config=quantization_config,
         device_map="auto",
         torch_dtype=torch.bfloat16,
