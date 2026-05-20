@@ -36,7 +36,10 @@ class GMTTrainer:
         step_count = 0
 
         for batch in dataloader:
-            inputs = {k: v.to(self.device) for k, v in batch.items() if k != 'labels'}
+            inputs = {
+                "input_ids": batch["labels"].to(self.device),
+                "attention_mask": batch["attention_mask"].to(self.device)
+            }
             labels = batch['labels'].to(self.device)
 
             outputs = self.model(**inputs, labels=labels)
