@@ -14,9 +14,9 @@ logger = logging.getLogger(__name__)
 
 # 本地路径配置
 LOCAL_PATHS = {
-    "mistralai/Mistral-7B-v0.1": "/autodl-tmp/model/Mistral-7B-v0.1",
-    "deepseek-ai/DeepSeek-Coder-Base-6.7B": "/autodl-tmp/model/DeepSeek-Coder-Base-6.7B",
-    "dataset": "/autodl-tmp/dataset/Magicoder-Evol-Instruct-110K"
+    "mistralai/Mistral-7B-v0.1": "/root/autodl-tmp/model/Mistral-7B-v0___1",
+    "deepseek-ai/DeepSeek-Coder-Base-6.7B": "/root/autodl-tmp/model/deepseek-coder-6.7b-base",
+    "dataset": "/root/autodl-tmp/dataset/Magicoder-Evol-Instruct-110K"
 }
 
 
