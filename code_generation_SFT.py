@@ -188,7 +188,7 @@ def run_experiment(model_name, dataset, algorithm_name="SFT", num_epochs=3, batc
 
     for epoch in range(num_epochs):
         loss = trainer.train_epoch(dataloader)
-        logger.info(f"Epoch {epoch+1}/{num_epochs}, Loss: {loss:.4f}")
+        # Training epoch
 
     benchmarks = ["humaneval", "mbpp", "humaneval_plus", "mbpp_plus"]
     results = {}
