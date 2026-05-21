@@ -109,7 +109,7 @@ def create_dataloader(dataset, batch_size=4):
     return dataloader
 
 
-def load_model(model_name, device="cuda", use_quantization=True):
+def load_model(model_name, device="cuda", use_quantization=False):
     logger.info(f"Loading model: {model_name}")
 
     # 检查本地路径
