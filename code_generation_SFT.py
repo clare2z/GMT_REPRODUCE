@@ -179,30 +179,39 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda"):
 
 def run_experiment(model_name, dataset, algorithm_name="SFT", num_epochs=3, batch_size=4, lr=2e-5):
     logger.info(f"\n===== Running {algorithm_name} with {model_name} =====")
-
+    
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    logger.info(">>> [CHECKPOINT 1/6] Loading model...")
     model, tokenizer = load_model(model_name, device=device)
+    logger.info(f">>> [CHECKPOINT 2/6] Model loaded successfully on {device}")
+    
+    logger.info(">>> [CHECKPOINT 3/6] Creating dataloader...")
     dataloader = create_dataloader(dataset, batch_size=batch_size)
-
+    logger.info(">>> [CHECKPOINT 3/6] Dataloader created")
+    
     trainer = SFTTrainer(model, tokenizer, device=device, lr=lr)
-
+    
     for epoch in range(num_epochs):
+        logger.info(f">>> [CHECKPOINT 4.{epoch+1}/{num_epochs}] Training epoch {epoch+1} started...")
         loss = trainer.train_epoch(dataloader)
-        # Training epoch
-
+        logger.info(f">>> [CHECKPOINT 4.{epoch+1}/{num_epochs}] Training epoch {epoch+1} completed, loss: {loss:.4f}")
+    
     benchmarks = ["humaneval", "mbpp", "humaneval_plus", "mbpp_plus"]
     results = {}
-    for benchmark in benchmarks:
+    for i, benchmark in enumerate(benchmarks):
+        logger.info(f">>> [CHECKPOINT 5.{i+1}/{len(benchmarks)}] Evaluating on {benchmark}...")
         score = evaluate_on_benchmark(model, tokenizer, benchmark, device=device)
         results[benchmark] = score
-
+        logger.info(f">>> [CHECKPOINT 5.{i+1}/{len(benchmarks)}] {benchmark} completed, score: {score:.4f}")
+    
     avg_score = sum(results.values()) / len(results) if results else 0.0
     results['average'] = avg_score
-
+    logger.info(f">>> [CHECKPOINT 6/6] All evaluations completed, average score: {avg_score:.4f}")
+    
     del model
     del tokenizer
     torch.cuda.empty_cache()
-
+    
     return results
 
 
