@@ -92,7 +92,8 @@ class DGMMFramework:
         consistency_weight: float = 0.2,
         ema_alpha: float = 0.9,
         device: str = "cuda",
-        dtype: torch.dtype = torch.bfloat16
+        dtype: torch.dtype = torch.bfloat16,
+        grad_history_window: int = 5
     ):
         self.device = device
         self.dtype = dtype
@@ -102,6 +103,7 @@ class DGMMFramework:
         self.contrastive_weight = contrastive_weight
         self.consistency_weight = consistency_weight
         self.ema_alpha = ema_alpha
+        self.grad_history_window = grad_history_window
 
         self.gradient_encoder = GradientEncoder(
             input_dim=encoder_hidden_dim,
@@ -122,7 +124,8 @@ class DGMMFramework:
         self.meta_optimizer = torch.optim.AdamW(
             list(self.gradient_encoder.parameters()) +
             list(self.contrastive_learner.parameters()) +
-            list(self.layer_attention.parameters()),
+            list(self.layer_attention.parameters()) +
+            list(self.layer_correlation_model.parameters()),
             lr=1e-4,
             weight_decay=1e-5
         )
@@ -130,6 +133,9 @@ class DGMMFramework:
         self.layer_importance: Dict[str, float] = {}
         self.prev_layer_importance: Dict[str, float] = {}
         self.global_importance_threshold = 0.5
+
+        self.grad_history: Dict[str, list] = {}
+        self.layer_correlation_model = nn.Linear(encoder_output_dim, encoder_output_dim).to(device).to(dtype)
 
     def _compute_layer_gradients(self, accumulated_grads: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         layer_grads = {}
@@ -144,19 +150,79 @@ class DGMMFramework:
 
         return layer_grads
 
+    def _analyze_gradient_direction(self, grad: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        positive_ratio = (grad > 0).float().mean()
+        negative_ratio = (grad < 0).float().mean()
+        zero_ratio = (grad == 0).float().mean()
+        return positive_ratio, negative_ratio, zero_ratio
+
+    def _analyze_gradient_stability(self, layer_name: str, current_grad: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if layer_name not in self.grad_history:
+            self.grad_history[layer_name] = []
+        
+        grad_std = torch.tensor(0.0, device=self.device)
+        grad_diff = torch.tensor(0.0, device=self.device)
+        momentum = torch.tensor(0.0, device=self.device)
+        
+        if len(self.grad_history[layer_name]) > 0:
+            grad_history = torch.stack(self.grad_history[layer_name])
+            grad_std = grad_history.std(dim=0).mean()
+            
+            if len(self.grad_history[layer_name]) >= 2:
+                recent_grads = grad_history[-2:]
+                grad_diff = torch.abs(recent_grads[1] - recent_grads[0]).mean()
+                
+                if len(self.grad_history[layer_name]) >= 3:
+                    prev_diff = torch.abs(recent_grads[0] - grad_history[-3]).mean()
+                    momentum = grad_diff / (prev_diff + 1e-8)
+        
+        self.grad_history[layer_name].append(current_grad.detach().clone())
+        if len(self.grad_history[layer_name]) > self.grad_history_window:
+            self.grad_history[layer_name].pop(0)
+        
+        return grad_std, grad_diff, momentum
+
+    def _analyze_layer_correlation(self, layer_features: torch.Tensor) -> torch.Tensor:
+        num_layers = layer_features.size(0)
+        if num_layers < 2:
+            return torch.tensor(0.0, device=self.device)
+        
+        normalized_features = (layer_features - layer_features.mean(dim=0)) / (layer_features.std(dim=0) + 1e-8)
+        correlation_matrix = torch.mm(normalized_features, normalized_features.t()) / self.encoder_output_dim
+        avg_correlation = correlation_matrix.mean()
+        
+        return avg_correlation
+
     def _extract_layer_features(self, layer_grads: Dict[str, torch.Tensor]) -> torch.Tensor:
         layer_features = []
+        direction_features = []
+        
         for layer_name in sorted(layer_grads.keys()):
             grad = layer_grads[layer_name]
+            
+            pos_ratio, neg_ratio, _ = self._analyze_gradient_direction(grad)
+            stability, grad_diff, momentum = self._analyze_gradient_stability(layer_name, grad)
+            
             if grad.size(0) < self.encoder_hidden_dim:
                 grad = F.pad(grad, (0, self.encoder_hidden_dim - grad.size(0)))
             elif grad.size(0) > self.encoder_hidden_dim:
                 grad = grad[:self.encoder_hidden_dim]
 
-            features = self.gradient_encoder(grad.unsqueeze(0).to(self.dtype))
-            layer_features.append(features)
-
-        return torch.cat(layer_features, dim=0)
+            base_features = self.gradient_encoder(grad.unsqueeze(0).to(self.dtype))
+            
+            direction_info = torch.tensor([pos_ratio, neg_ratio, stability, grad_diff, momentum], 
+                                         device=self.device, dtype=self.dtype).unsqueeze(0)
+            direction_features.append(direction_info)
+            
+            layer_features.append(base_features)
+        
+        layer_features = torch.cat(layer_features, dim=0)
+        direction_features = torch.cat(direction_features, dim=0)
+        
+        combined_features = torch.cat([layer_features, direction_features], dim=-1)
+        combined_features = self.layer_correlation_model(combined_features)
+        
+        return combined_features
 
     def _build_contrastive_samples(self, layer_features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         anchors = layer_features
@@ -167,6 +233,8 @@ class DGMMFramework:
     def apply_mask(self, accumulated_grads: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         layer_grads = self._compute_layer_gradients(accumulated_grads)
         layer_features = self._extract_layer_features(layer_grads)
+
+        layer_correlation = self._analyze_layer_correlation(layer_features)
 
         anchors, positives, negatives = self._build_contrastive_samples(layer_features)
         contrastive_loss = self.contrastive_learner(anchors, positives, negatives)
@@ -187,7 +255,7 @@ class DGMMFramework:
 
             self.prev_layer_importance[layer_name] = importance
 
-        total_meta_loss = self.contrastive_weight * contrastive_loss + self.consistency_weight * consistency_loss
+        total_meta_loss = self.contrastive_weight * contrastive_loss + self.consistency_weight * consistency_loss - 0.05 * layer_correlation
 
         self.meta_optimizer.zero_grad()
         total_meta_loss.backward()
