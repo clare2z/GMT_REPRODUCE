@@ -15,6 +15,103 @@
 | **动态更新门控** | 每个参数学习独立的更新概率 | 自适应学习更新策略 |
 | **跨层注意力融合** | 使用注意力机制融合跨层梯度信息 | 捕捉层间依赖关系 |
 | **一致性约束** | 正则化相邻step间的重要性变化 | 增强训练稳定性 |
+| **关键层识别** | 通过关键词匹配识别关键层和低价值层 | 差异化更新策略 |
+| **方向翻转检测** | 检测梯度正负方向反复跳跃的波动 | 减少噪声干扰 |
+
+### 三大核心功能
+
+#### 1️⃣ 为关键层保留更多可更新参数
+
+**实现方法：**
+- **动态重要性评估**：通过梯度编码器分析每层的梯度特征，计算层重要性分数
+- **自适应掩码比例**：重要层获得高重要性分数，从而保留更多可更新参数
+- **对比学习优化**：通过对比学习识别关键层，确保重要层被正确识别
+
+**关键层识别：**
+- Attention层：`attention`, `attn`, `q_proj`, `k_proj`, `v_proj`, `o_proj`
+- FFN层：`ffn`, `feed_forward`, `mlp`, `w1`, `w2`, `w3`
+- 嵌入层：`embed`, `embedding`, `lm_head`
+
+**核心代码逻辑：**
+```python
+def _is_critical_layer(self, layer_name):
+    keywords = ['attention', 'attn', 'q_proj', 'k_proj', 'v_proj', 'o_proj',
+                'ffn', 'feed_forward', 'mlp', 'w1', 'w2', 'w3',
+                'embed', 'embedding', 'lm_head']
+    return any(keyword in layer_name.lower() for keyword in keywords)
+```
+
+#### 2️⃣ 减少低价值层中的冗余更新
+
+**实现方法：**
+- **梯度稳定性分析**：计算梯度历史的标准差，识别波动大的层
+- **梯度大小判断**：计算当前梯度的平均绝对值，判断是否还在学习
+- **方向翻转检测**：检测梯度正负方向反复跳跃的波动
+- **层间协同分析**：使用皮尔逊系数计算层间相关性，识别与其他层协同性低的层
+
+**低价值层识别：**
+- 归一化层：`layer_norm`, `ln_`, `norm`
+- 偏置项：`bias`
+
+**核心代码逻辑：**
+```python
+# 方向翻转检测
+sign_changes = 0
+for i in range(1, len(grad_history)):
+    prev_sign = torch.sign(grad_history[i-1])
+    curr_sign = torch.sign(grad_history[i])
+    sign_diff = torch.abs(prev_sign - curr_sign)
+    sign_changes += (sign_diff > 1).float().mean()
+direction_flip = sign_changes / (len(grad_history) - 1)
+```
+
+#### 3️⃣ 提高参数利用效率与模型鲁棒性
+
+**A. 参数利用效率：**
+- **对比学习**：识别相似层，避免重复更新
+- **层间协同**：鼓励相关层协同更新，提高效率
+- **动态调整**：根据学习进度自适应调整掩码比例
+
+**B. 模型鲁棒性：**
+- **一致性约束**：限制重要性分数的剧烈变化
+- **长期稳定性追踪**：避免短期噪声影响
+- **EMA平滑**：使用指数移动平均平滑重要性分数
+
+**核心代码逻辑：**
+```python
+# 一致性损失（提高鲁棒性）
+consistency_loss = (importance - self.prev_layer_importance[layer_name]) ** 2
+
+# EMA平滑（提高鲁棒性）
+self.layer_importance[layer_name] = (
+    self.ema_alpha * self.layer_importance[layer_name] + 
+    (1 - self.ema_alpha) * importance
+)
+
+# 层间协同（提高效率）
+total_meta_loss = contrastive_loss + consistency_loss - 0.05 * layer_correlation
+```
+
+#### 三大功能的协同作用
+
+```
+梯度分析 → 重要性评估 → 动态掩码 → 参数更新
+     ↓           ↓           ↓
+     ↓          ↓
+方向分析    关键层识别   保留参数    高效更新
+稳定性分析  低价值层识别  减少冗余    避免浪费
+协同分析    层间关系     协同更新    提高鲁棒性
+```
+
+#### 稳定性-更新比例关系
+
+| 稳定性 | 梯度幅度 | 方向翻转 | 关键层 | 普通层 | 低价值层 |
+|--------|----------|----------|--------|--------|----------|
+| 高（<0.05） | 大（>0.01） | 低 | +20% | +5% | 限制80% |
+| 高（<0.05） | 小（<0.001） | 低 | 保持 | -40% | -70% |
+| 中（0.05~0.2） | - | 低 | 保持90% | -15% | 限制 |
+| 低（>0.2） | - | 低 | 保持70% | -30% | -50% |
+| - | - | 高（>0.3） | 适度惩罚 | -20~40% | -60% |
 
 ### 算法流程图
 
