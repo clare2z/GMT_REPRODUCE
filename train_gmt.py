@@ -3,6 +3,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import logging
+import sys
+if sys.version_info >= (3, 13):
+    from typing import TypeAlias
+else:
+    from typing_extensions import TypeAlias
 from typing import Dict, Tuple, Optional, List
 from transformers import (
     AutoTokenizer, 
@@ -243,7 +248,7 @@ class DynamicGradientManifoldTrainer:
             layer_name = name.split('.')[0]
             if layer_name not in layer_grads:
                 layer_grads[layer_name] = []
-            layer_grads[layer_name].append(grad.flatten())
+            layer_grads[layer_name].append(grad.to(self.device).flatten())
         
         for layer_name in layer_grads:
             layer_grads[layer_name] = torch.cat(layer_grads[layer_name], dim=0)

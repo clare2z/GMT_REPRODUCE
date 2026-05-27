@@ -93,11 +93,7 @@ class DGMMFramework:
         ema_alpha: float = 0.9,
         device: str = "cuda",
         dtype: torch.dtype = torch.bfloat16,
-        grad_history_window: int = 5,
-        critical_layer_min_importance: float = 0.4,
-        low_value_layer_max_importance: float = 0.3,
-        stability_threshold_high: float = 0.05,
-        stability_threshold_low: float = 0.2
+        grad_history_window: int = 5
     ):
         self.device = device
         self.dtype = dtype
@@ -108,11 +104,6 @@ class DGMMFramework:
         self.consistency_weight = consistency_weight
         self.ema_alpha = ema_alpha
         self.grad_history_window = grad_history_window
-        
-        self.critical_layer_min_importance = critical_layer_min_importance
-        self.low_value_layer_max_importance = low_value_layer_max_importance
-        self.stability_threshold_high = stability_threshold_high
-        self.stability_threshold_low = stability_threshold_low
 
         self.gradient_encoder = GradientEncoder(
             input_dim=encoder_hidden_dim,
@@ -130,41 +121,23 @@ class DGMMFramework:
             num_layers=12
         ).to(device).to(dtype)
 
-        self.layer_correlation_model = nn.Linear(encoder_output_dim, encoder_output_dim).to(device).to(dtype)
-        
-        self.meta_optimizer = torch.optim.AdamW(
-            list(self.gradient_encoder.parameters()) +
-            list(self.contrastive_learner.parameters()) +
-            list(self.layer_attention.parameters()) +
-            list(self.layer_correlation_model.parameters()),
-            lr=1e-4,
-            weight_decay=1e-5
-        )
-
         self.layer_importance: Dict[str, float] = {}
         self.prev_layer_importance: Dict[str, float] = {}
         self.global_importance_threshold = 0.5
 
         self.grad_history: Dict[str, list] = {}
-        
-        self.critical_layer_keywords = ['attention', 'attn', 'q_proj', 'k_proj', 'v_proj', 'o_proj', 
-                                       'ffn', 'feed_forward', 'mlp', 'w1', 'w2', 'w3',
-                                       'embed', 'embedding', 'lm_head']
-        self.low_value_layer_keywords = ['layer_norm', 'ln_', '.ln.', 'bias', 'norm']
 
-    def _is_critical_layer(self, layer_name: str) -> bool:
-        lower_name = layer_name.lower()
-        for keyword in self.critical_layer_keywords:
-            if keyword in lower_name:
-                return True
-        return False
+        # 将梯度编码特征(64维) + 统计特征(6维: 正/负/零比例 + 标准差/波动/动量) 融合
+        self.feature_fusion = nn.Linear(encoder_output_dim + 6, encoder_output_dim).to(device).to(dtype)
 
-    def _is_low_value_layer(self, layer_name: str) -> bool:
-        lower_name = layer_name.lower()
-        for keyword in self.low_value_layer_keywords:
-            if keyword in lower_name:
-                return True
-        return False
+        self.meta_optimizer = torch.optim.AdamW(
+            list(self.gradient_encoder.parameters()) +
+            list(self.contrastive_learner.parameters()) +
+            list(self.layer_attention.parameters()) +
+            list(self.feature_fusion.parameters()),
+            lr=1e-4,
+            weight_decay=1e-5
+        )
 
     def _compute_layer_gradients(self, accumulated_grads: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         layer_grads = {}
@@ -185,42 +158,38 @@ class DGMMFramework:
         zero_ratio = (grad == 0).float().mean()
         return positive_ratio, negative_ratio, zero_ratio
 
-    def _analyze_gradient_stability(self, layer_name: str, current_grad: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _analyze_gradient_stability(self, layer_name: str, current_grad: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if layer_name not in self.grad_history:
             self.grad_history[layer_name] = []
         
-        grad_std = torch.tensor(0.0, device=self.device)
-        grad_diff = torch.tensor(0.0, device=self.device)
-        momentum = torch.tensor(0.0, device=self.device)
-        direction_flip = torch.tensor(0.0, device=self.device)
+        grad_std = 0.0
+        grad_diff = 0.0
+        momentum = 0.0
+        
+        current_grad_norm = float(current_grad.norm().item())
         
         if len(self.grad_history[layer_name]) > 0:
-            grad_history = torch.stack(self.grad_history[layer_name])
-            grad_std = grad_history.std(dim=0).mean()
+            grad_std = float(np.std(self.grad_history[layer_name]))
             
             if len(self.grad_history[layer_name]) >= 2:
-                recent_grads = grad_history[-2:]
-                grad_diff = torch.abs(recent_grads[1] - recent_grads[0]).mean()
+                recent_grad_norm = self.grad_history[layer_name][-1]
+                prev_grad_norm = self.grad_history[layer_name][-2]
+                grad_diff = float(np.abs(recent_grad_norm - prev_grad_norm))
                 
                 if len(self.grad_history[layer_name]) >= 3:
-                    prev_diff = torch.abs(recent_grads[0] - grad_history[-3]).mean()
-                    momentum = grad_diff / (prev_diff + 1e-8)
-            
-            if len(self.grad_history[layer_name]) >= 2:
-                sign_changes = 0
-                for i in range(1, len(self.grad_history[layer_name])):
-                    prev_sign = torch.sign(self.grad_history[layer_name][i-1])
-                    curr_sign = torch.sign(self.grad_history[layer_name][i])
-                    sign_diff = torch.abs(prev_sign - curr_sign)
-                    sign_changes += (sign_diff > 1).float().mean()
-                
-                direction_flip = sign_changes / (len(self.grad_history[layer_name]) - 1)
+                    prev_prev_grad_norm = self.grad_history[layer_name][-3]
+                    prev_diff = np.abs(prev_grad_norm - prev_prev_grad_norm)
+                    momentum = float(grad_diff / (prev_diff + 1e-8))
         
-        self.grad_history[layer_name].append(current_grad.detach().clone())
+        self.grad_history[layer_name].append(current_grad_norm)
         if len(self.grad_history[layer_name]) > self.grad_history_window:
             self.grad_history[layer_name].pop(0)
         
-        return grad_std, grad_diff, momentum, direction_flip
+        return (
+            torch.tensor(grad_std, device=self.device),
+            torch.tensor(grad_diff, device=self.device),
+            torch.tensor(momentum, device=self.device)
+        )
 
     def _analyze_layer_correlation(self, layer_features: torch.Tensor) -> torch.Tensor:
         num_layers = layer_features.size(0)
@@ -235,34 +204,32 @@ class DGMMFramework:
 
     def _extract_layer_features(self, layer_grads: Dict[str, torch.Tensor]) -> torch.Tensor:
         layer_features = []
-        direction_features = []
-        
+
         for layer_name in sorted(layer_grads.keys()):
             grad = layer_grads[layer_name]
-            
-            pos_ratio, neg_ratio, _ = self._analyze_gradient_direction(grad)
-            stability, grad_diff, momentum, direction_flip = self._analyze_gradient_stability(layer_name, grad)
-            
+
+            pos_ratio, neg_ratio, zero_ratio = self._analyze_gradient_direction(grad)
+            stability, grad_diff, momentum = self._analyze_gradient_stability(layer_name, grad)
+
+            # 方向特征(3) + 稳定性特征(3) → 6维统计向量
+            stats = torch.stack([
+                pos_ratio.detach(), neg_ratio.detach(), zero_ratio.detach(),
+                stability.detach(), grad_diff.detach(), momentum.detach()
+            ])
+
             if grad.size(0) < self.encoder_hidden_dim:
                 grad = F.pad(grad, (0, self.encoder_hidden_dim - grad.size(0)))
             elif grad.size(0) > self.encoder_hidden_dim:
                 grad = grad[:self.encoder_hidden_dim]
 
             base_features = self.gradient_encoder(grad.unsqueeze(0).to(self.dtype))
-            
-            direction_info = torch.tensor([pos_ratio, neg_ratio, stability, grad_diff, momentum, direction_flip], 
-                                         device=self.device, dtype=self.dtype).unsqueeze(0)
-            direction_features.append(direction_info)
-            
-            layer_features.append(base_features)
-        
+            fused = self.feature_fusion(torch.cat([base_features.squeeze(0), stats], dim=0))
+
+            layer_features.append(fused.unsqueeze(0))
+
         layer_features = torch.cat(layer_features, dim=0)
-        direction_features = torch.cat(direction_features, dim=0)
-        
-        combined_features = torch.cat([layer_features, direction_features], dim=-1)
-        combined_features = self.layer_correlation_model(combined_features)
-        
-        return combined_features
+
+        return layer_features
 
     def _build_contrastive_samples(self, layer_features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         anchors = layer_features
@@ -285,34 +252,6 @@ class DGMMFramework:
         consistency_loss = 0.0
         for i, layer_name in enumerate(sorted(layer_grads.keys())):
             importance = importance_scores[i].item()
-            
-            is_critical = self._is_critical_layer(layer_name)
-            is_low_value = self._is_low_value_layer(layer_name)
-            
-            stability = 0.0
-            grad_magnitude = 0.0
-            direction_flip = 0.0
-            if layer_name in self.grad_history and len(self.grad_history[layer_name]) > 0:
-                grad_history = torch.stack(self.grad_history[layer_name])
-                stability = grad_history.std(dim=0).mean().item()
-                grad_magnitude = torch.abs(layer_grads[layer_name]).mean().item()
-                
-                if len(self.grad_history[layer_name]) >= 2:
-                    sign_changes = 0
-                    for j in range(1, len(self.grad_history[layer_name])):
-                        prev_sign = torch.sign(self.grad_history[layer_name][j-1])
-                        curr_sign = torch.sign(self.grad_history[layer_name][j])
-                        sign_diff = torch.abs(prev_sign - curr_sign)
-                        sign_changes += (sign_diff > 1).float().mean()
-                    direction_flip = sign_changes.item() / (len(self.grad_history[layer_name]) - 1)
-            
-            if is_critical:
-                importance = self._adjust_critical_layer_importance(importance, stability, grad_magnitude, direction_flip)
-            elif is_low_value:
-                importance = self._adjust_low_value_layer_importance(importance, stability, grad_magnitude, direction_flip)
-            else:
-                importance = self._adjust_normal_layer_importance(importance, stability, grad_magnitude, direction_flip)
-
             if layer_name in self.prev_layer_importance:
                 consistency_loss += (importance - self.prev_layer_importance[layer_name]) ** 2
 
@@ -323,7 +262,7 @@ class DGMMFramework:
 
             self.prev_layer_importance[layer_name] = importance
 
-        total_meta_loss = contrastive_loss + consistency_loss - 0.05 * layer_correlation
+        total_meta_loss = self.contrastive_weight * contrastive_loss + self.consistency_weight * consistency_loss - 0.05 * layer_correlation
 
         self.meta_optimizer.zero_grad()
         total_meta_loss.backward()
@@ -338,58 +277,6 @@ class DGMMFramework:
             masked_grads[name] = grad * mask.to(self.dtype)
 
         return masked_grads
-
-    def _adjust_critical_layer_importance(self, importance: float, stability: float, grad_magnitude: float, direction_flip: float) -> float:
-        base_importance = importance
-        
-        if stability < self.stability_threshold_high:
-            if grad_magnitude > 0.01:
-                importance = max(importance, self.critical_layer_min_importance * 1.2)
-            else:
-                importance = max(importance, self.critical_layer_min_importance)
-        elif stability < self.stability_threshold_low:
-            importance = max(importance, self.critical_layer_min_importance * 0.9)
-        else:
-            importance = max(importance, self.critical_layer_min_importance * 0.7)
-        
-        if direction_flip > 0.3:
-            flip_penalty = 1.0 - (direction_flip - 0.3) * 0.5
-            importance = max(importance, base_importance * flip_penalty)
-        
-        return min(importance, 0.95)
-
-    def _adjust_low_value_layer_importance(self, importance: float, stability: float, grad_magnitude: float, direction_flip: float) -> float:
-        if stability < self.stability_threshold_high:
-            if grad_magnitude < 0.001:
-                importance *= 0.3
-            else:
-                importance = min(importance, self.low_value_layer_max_importance * 0.8)
-        elif stability < self.stability_threshold_low:
-            importance = min(importance, self.low_value_layer_max_importance)
-        else:
-            importance = min(importance, self.low_value_layer_max_importance * 0.5)
-        
-        if direction_flip > 0.2:
-            importance *= (1.0 - direction_flip * 0.6)
-        
-        return max(importance, 0.05)
-
-    def _adjust_normal_layer_importance(self, importance: float, stability: float, grad_magnitude: float, direction_flip: float) -> float:
-        if stability < self.stability_threshold_high:
-            if grad_magnitude > 0.01:
-                importance *= 1.05
-            elif grad_magnitude < 0.001:
-                importance *= 0.6
-        elif stability < self.stability_threshold_low:
-            importance *= 0.85
-        else:
-            importance *= 0.7
-        
-        if direction_flip > 0.25:
-            flip_factor = 1.0 - min(direction_flip - 0.25, 0.5) * 0.8
-            importance *= flip_factor
-        
-        return max(min(importance, 0.9), 0.1)
 
 
 class DGMMTrainer:

@@ -639,7 +639,7 @@ def run_experiment(algorithm_name, model_name, dataset, num_epochs=3, batch_size
 
 def main():
     algorithms = ["SFT", "Drop", "HFT", "RMT", "GMT", "DGMM"]
-    models = ["mistralai/Mistral-7B-v0.1", "deepseek-ai/DeepSeek-Coder-Base-6.7B"]
+    models = ["distilgpt2"]
     benchmarks = ["HumanEval", "MBPP", "HumanEval+", "MBPP+", "Average"]
 
     logger.info("===== Starting Code Generation Experiment =====")
