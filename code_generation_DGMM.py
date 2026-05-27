@@ -224,7 +224,7 @@ class DGMMFramework:
                 grad = grad[:self.encoder_hidden_dim]
 
             base_features = self.gradient_encoder(grad.unsqueeze(0).to(self.dtype))
-            fused = self.feature_fusion(torch.cat([base_features.squeeze(0), stats], dim=0))
+            fused = self.feature_fusion(torch.cat([base_features.squeeze(0), stats.to(self.dtype)], dim=0))
 
             layer_features.append(fused.unsqueeze(0))
 
