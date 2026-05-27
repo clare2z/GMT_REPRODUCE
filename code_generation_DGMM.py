@@ -494,7 +494,10 @@ def run_experiment(model_name, dataset, algorithm_name="DGMM", num_epochs=3, bat
 
 def main():
     algorithm_name = "DGMM"
-    models = ["mistralai/Mistral-7B-v0.1", "deepseek-ai/DeepSeek-Coder-Base-6.7B"]
+    models = [
+        "mistralai/Mistral-7B-v0.1",
+        # "deepseek-ai/DeepSeek-Coder-Base-6.7B",  # 先注释掉，跑完一个再看
+    ]
     benchmarks = ["HumanEval", "MBPP", "HumanEval+", "MBPP+", "Average"]
 
     logger.info(f"===== Starting Code Generation Experiment - {algorithm_name} =====")
