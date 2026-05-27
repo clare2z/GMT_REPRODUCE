@@ -319,8 +319,10 @@ class DGMMTrainer:
                 for name, param in self.model.named_parameters():
                     if name in masked_grads:
                         param.grad = masked_grads[name]
+                del accumulated_grads, masked_grads
 
             self.optimizer.step()
+            torch.cuda.empty_cache()
 
             total_loss += loss.item()
             count += 1
@@ -340,7 +342,7 @@ def load_magicoder_dataset():
     return dataset
 
 
-def preprocess_dataset(dataset, tokenizer, max_length=512):
+def preprocess_dataset(dataset, tokenizer, max_length=256):
     def format_instruction(example):
         instruction = example.get('instruction', '')
         response = example.get('response', '')
@@ -454,12 +456,13 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda"):
         return 0.0
 
 
-def run_experiment(model_name, dataset, algorithm_name="DGMM", num_epochs=3, batch_size=4, lr=2e-5):
+def run_experiment(model_name, dataset, algorithm_name="DGMM", num_epochs=3, batch_size=1, lr=2e-5):
     logger.info(f"\n===== Running {algorithm_name} with {model_name} =====")
-    
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    logger.info(">>> [CHECKPOINT 1/6] Loading model...")
-    model, tokenizer = load_model(model_name, device=device)
+    logger.info(">>> [CHECKPOINT 1/6] Loading model (4-bit quantized)...")
+    model, tokenizer = load_model(model_name, device=device, use_quantization=True)
+    model.gradient_checkpointing_enable()  # 用激活换显存
     logger.info(f">>> [CHECKPOINT 2/6] Model loaded successfully on {device}")
     
     logger.info(">>> [CHECKPOINT 3/6] Creating dataloader...")
