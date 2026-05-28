@@ -197,11 +197,12 @@ class DGMMFramework:
         num_layers = layer_features.size(0)
         if num_layers < 2:
             return torch.tensor(0.0, device=self.device)
-        
-        normalized_features = (layer_features - layer_features.mean(dim=0)) / (layer_features.std(dim=0) + 1e-8)
+
+        # 皮尔逊相关系数：先对每层(每行)做 z-score 归一化，再计算协方差矩阵
+        normalized_features = (layer_features - layer_features.mean(dim=1, keepdim=True)) / (layer_features.std(dim=1, keepdim=True) + 1e-8)
         correlation_matrix = torch.mm(normalized_features, normalized_features.t()) / self.encoder_output_dim
         avg_correlation = correlation_matrix.mean()
-        
+
         return avg_correlation
 
     def _extract_layer_features(self, layer_grads: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -239,7 +240,7 @@ class DGMMFramework:
         negatives = layer_features[torch.randperm(layer_features.size(0))]
         return anchors, positives, negatives
 
-    def apply_mask(self, accumulated_grads: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def apply_mask(self, accumulated_grads: Dict[str, torch.Tensor]) -> Tuple[Dict[str, torch.Tensor], Dict]:
         layer_grads = self._compute_layer_gradients(accumulated_grads)
         layer_features = self._extract_layer_features(layer_grads)
 
@@ -250,6 +251,8 @@ class DGMMFramework:
 
         fused_features = self.layer_attention(layer_features)
         importance_scores = torch.sigmoid(torch.mean(fused_features, dim=-1))
+
+        avg_importance = importance_scores.mean().item()
 
         consistency_loss = 0.0
         for i, layer_name in enumerate(sorted(layer_grads.keys())):
@@ -275,10 +278,18 @@ class DGMMFramework:
             layer_name = name.split('.')[0]
             importance = self.layer_importance.get(layer_name, self.global_importance_threshold)
 
-            mask = torch.rand(grad.size(), device=self.device) < importance
-            masked_grads[name] = grad * mask.to(self.dtype)
+            # 重要性加权：重要性高 → 梯度保留多；重要性低 → 梯度衰减多
+            # 夹到 [0.1, 1.0] 防止完全归零
+            weight = max(0.1, min(1.0, importance))
+            masked_grads[name] = grad * weight
 
-        return masked_grads
+        info = {
+            'avg_importance': avg_importance,
+            'layer_corr': layer_correlation.item(),
+            'contrastive_loss': contrastive_loss.item(),
+            'consistency_loss': consistency_loss,
+        }
+        return masked_grads, info
 
 
 class DGMMTrainer:
@@ -298,6 +309,10 @@ class DGMMTrainer:
         count = 0
         total_batches = len(dataloader)
         t_start = time.time()
+        best_loss = float('inf')
+
+        print(f"  [锚点] 训练开始 | 总步数={total_batches} | 时间={datetime.now().strftime('%H:%M:%S')}")
+        print(f"  [锚点] 显存状态: {torch.cuda.memory_summary().split(chr(10))[0] if torch.cuda.is_available() else 'N/A'}")
 
         for batch in dataloader:
             inputs = {
@@ -309,6 +324,11 @@ class DGMMTrainer:
             outputs = self.model(**inputs, labels=labels)
             loss = outputs.loss
 
+            # NaN 检测
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"  ❌ [中止] Step {count}: loss={loss.item()} — 立即停止!")
+                return float('nan')
+
             self.optimizer.zero_grad()
             loss.backward()
 
@@ -317,8 +337,9 @@ class DGMMTrainer:
                 if param.grad is not None:
                     accumulated_grads[name] = param.grad.clone().detach()
 
+            dgmm_info = None
             if accumulated_grads:
-                masked_grads = self.dgmm.apply_mask(accumulated_grads)
+                masked_grads, dgmm_info = self.dgmm.apply_mask(accumulated_grads)
                 for name, param in self.model.named_parameters():
                     if name in masked_grads:
                         param.grad = masked_grads[name]
@@ -334,9 +355,18 @@ class DGMMTrainer:
                 elapsed = time.time() - t_start
                 avg_time = elapsed / count
                 eta = avg_time * (total_batches - count)
-                logger.info(f"  Step {count}/{total_batches} | loss={loss.item():.4f} | "
-                            f"elapsed={elapsed:.0f}s | eta={eta:.0f}s")
+                mask_pct = ""
+                if dgmm_info:
+                    imp = dgmm_info.get('avg_importance', 0)
+                    mask_pct = f" | imp={imp:.3f} corr={dgmm_info.get('layer_corr', 0):.3f}"
+                status = "✅" if loss.item() < best_loss else "  "
+                best_loss = min(best_loss, loss.item())
+                logger.info(f"  {status} Step {count}/{total_batches} | loss={loss.item():.4f} | "
+                            f"elapsed={elapsed:.0f}s | eta={eta:.0f}s{mask_pct}")
+                print(f"  {status} Step {count}/{total_batches} | loss={loss.item():.4f} | "
+                      f"elapsed={elapsed:.0f}s | eta={eta:.0f}s{mask_pct}")
 
+        print(f"  [锚点] 训练完成 | avg_loss={total_loss/count:.4f} | 耗时={time.time()-t_start:.0f}s")
         return total_loss / count if count > 0 else 0.0
 
 
@@ -432,6 +462,9 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda"):
         correct = 0
         total = min(len(dataset), 100)
         t_start = time.time()
+        total_generated = 0  # 统计非空生成数
+
+        print(f"  [锚点] {benchmark_name}: 开始评测 {total} 题 | {datetime.now().strftime('%H:%M:%S')}")
 
         model.eval()
         for i, example in enumerate(dataset.select(range(total))):
@@ -447,16 +480,33 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda"):
                 top_k=1,
                 pad_token_id=tokenizer.eos_token_id
             )
-            # 只取生成部分，去掉输入的 prompt
             generated_ids = outputs[0][input_len:]
             generated_code = tokenizer.decode(generated_ids, skip_special_tokens=True)
 
+            if not generated_code.strip():
+                continue
+
+            total_generated += 1
+
+            # 前3个样本打印出来确认模型在正常生成
+            if i < 3:
+                print(f"  [样本 #{i+1}] {benchmark_name}")
+                print(f"    prompt[:80]: {prompt[:80]}...")
+                print(f"    generated[:120]: {generated_code[:120]}...")
+                print(f"    ----")
+
             try:
                 exec_globals = {}
+                # HumanEval: prompt 是函数签名 (合法 Python), 拼接后 exec
                 exec(prompt + generated_code + "\n" + test, exec_globals)
                 correct += 1
             except Exception:
-                pass
+                try:
+                    # MBPP: prompt 是自然语言描述, 只用生成部分 exec
+                    exec(generated_code + "\n" + test, exec_globals)
+                    correct += 1
+                except Exception:
+                    pass
 
             if (i + 1) % 10 == 0:
                 elapsed = time.time() - t_start
@@ -467,6 +517,8 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda"):
 
         pass_rate = correct / total if total > 0 else 0.0
         logger.info(f"{benchmark_name} pass@1: {pass_rate:.4f}")
+        print(f"  [锚点] {benchmark_name} 完成 | 有效生成: {total_generated}/{total} | "
+              f"正确: {correct}/{total} | pass@1={pass_rate:.4f} | 耗时={time.time()-t_start:.0f}s")
         return pass_rate
 
     except Exception as e:
