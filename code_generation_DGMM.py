@@ -7,6 +7,7 @@ import csv
 import os
 from datetime import datetime
 from typing import Dict, Tuple
+import time
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from datasets import load_dataset
 
@@ -295,6 +296,8 @@ class DGMMTrainer:
         self.model.train()
         total_loss = 0.0
         count = 0
+        total_batches = len(dataloader)
+        t_start = time.time()
 
         for batch in dataloader:
             inputs = {
@@ -326,6 +329,13 @@ class DGMMTrainer:
 
             total_loss += loss.item()
             count += 1
+
+            if count % 10 == 0 or count == 1:
+                elapsed = time.time() - t_start
+                avg_time = elapsed / count
+                eta = avg_time * (total_batches - count)
+                logger.info(f"  Step {count}/{total_batches} | loss={loss.item():.4f} | "
+                            f"elapsed={elapsed:.0f}s | eta={eta:.0f}s")
 
         return total_loss / count if count > 0 else 0.0
 
@@ -421,6 +431,7 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda"):
 
         correct = 0
         total = min(len(dataset), 100)
+        t_start = time.time()
 
         model.eval()
         for i, example in enumerate(dataset.select(range(total))):
@@ -428,6 +439,7 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda"):
             test = example.get('test', '')
 
             inputs = tokenizer(prompt, return_tensors="pt").to(device)
+            input_len = inputs.input_ids.shape[1]
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=256,
@@ -435,17 +447,23 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda"):
                 top_k=1,
                 pad_token_id=tokenizer.eos_token_id
             )
-            generated_code = tokenizer.decode(outputs[0], skip_special_tokens=True)
+            # 只取生成部分，去掉输入的 prompt
+            generated_ids = outputs[0][input_len:]
+            generated_code = tokenizer.decode(generated_ids, skip_special_tokens=True)
 
             try:
                 exec_globals = {}
-                exec(generated_code + "\n" + test, exec_globals)
+                exec(prompt + generated_code + "\n" + test, exec_globals)
                 correct += 1
             except Exception:
                 pass
 
             if (i + 1) % 10 == 0:
-                logger.info(f"Progress: {i+1}/{total}, Correct: {correct}")
+                elapsed = time.time() - t_start
+                avg_time = elapsed / (i + 1)
+                eta = avg_time * (total - i - 1)
+                logger.info(f"  [{benchmark_name}] {i+1}/{total} | correct={correct} | "
+                            f"elapsed={elapsed:.0f}s | eta={eta:.0f}s")
 
         pass_rate = correct / total if total > 0 else 0.0
         logger.info(f"{benchmark_name} pass@1: {pass_rate:.4f}")
@@ -472,9 +490,12 @@ def run_experiment(model_name, dataset, algorithm_name="DGMM", num_epochs=3, bat
     trainer = DGMMTrainer(model, tokenizer, device=device, lr=lr)
 
     for epoch in range(num_epochs):
+        t_epoch_start = time.time()
         logger.info(f">>> [CHECKPOINT 4.{epoch+1}/{num_epochs}] Training epoch {epoch+1} started...")
         loss = trainer.train_epoch(dataloader)
-        logger.info(f">>> [CHECKPOINT 4.{epoch+1}/{num_epochs}] Training epoch {epoch+1} completed, loss: {loss:.4f}")
+        t_epoch = time.time() - t_epoch_start
+        logger.info(f">>> [CHECKPOINT 4.{epoch+1}/{num_epochs}] Training epoch {epoch+1} completed, "
+                    f"loss: {loss:.4f}, time: {t_epoch:.0f}s")
     
     benchmarks = ["humaneval", "mbpp", "humaneval_plus", "mbpp_plus"]
     results = {}
