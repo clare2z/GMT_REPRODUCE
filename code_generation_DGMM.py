@@ -11,6 +11,10 @@ import time
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from datasets import load_dataset
 
+# 国内服务器用 HF 镜像，避免网络不通导致评测全零
+if os.environ.get("HF_ENDPOINT") is None:
+    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -530,16 +534,21 @@ def run_experiment(model_name, dataset, algorithm_name="DGMM", num_epochs=3, bat
     logger.info(f"\n===== Running {algorithm_name} with {model_name} =====")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    logger.info(">>> [CHECKPOINT 1/6] Loading model (4-bit quantized)...")
+    logger.info(">>> [CHECKPOINT 1/6] Loading model...")
     model, tokenizer = load_model(model_name, device=device, use_quantization=True)
-    model.gradient_checkpointing_enable()  # 用激活换显存
+    model.gradient_checkpointing_enable()
     logger.info(f">>> [CHECKPOINT 2/6] Model loaded successfully on {device}")
-    
+
     logger.info(">>> [CHECKPOINT 3/6] Creating dataloader...")
     dataloader = create_dataloader(dataset, batch_size=batch_size)
     logger.info(">>> [CHECKPOINT 3/6] Dataloader created")
-    
+
     trainer = DGMMTrainer(model, tokenizer, device=device, lr=lr)
+
+    # 模型保存路径（训练完保存，下次可用 skip_training=True 跳过训练）
+    safe_name = model_name.replace("/", "_")
+    ckpt_dir = f"checkpoints/{safe_name}_{algorithm_name}"
+    os.makedirs(ckpt_dir, exist_ok=True)
 
     for epoch in range(num_epochs):
         t_epoch_start = time.time()
@@ -548,7 +557,13 @@ def run_experiment(model_name, dataset, algorithm_name="DGMM", num_epochs=3, bat
         t_epoch = time.time() - t_epoch_start
         logger.info(f">>> [CHECKPOINT 4.{epoch+1}/{num_epochs}] Training epoch {epoch+1} completed, "
                     f"loss: {loss:.4f}, time: {t_epoch:.0f}s")
-    
+
+    # 保存模型，避免断连后白训
+    logger.info(f">>> [CHECKPOINT 4.5] Saving model to {ckpt_dir}...")
+    model.save_pretrained(ckpt_dir)
+    tokenizer.save_pretrained(ckpt_dir)
+    logger.info(f">>> [CHECKPOINT 4.5] Model saved ✓")
+
     benchmarks = ["humaneval", "mbpp", "humaneval_plus", "mbpp_plus"]
     results = {}
     for i, benchmark in enumerate(benchmarks):
@@ -556,15 +571,15 @@ def run_experiment(model_name, dataset, algorithm_name="DGMM", num_epochs=3, bat
         score = evaluate_on_benchmark(model, tokenizer, benchmark, device=device)
         results[benchmark] = score
         logger.info(f">>> [CHECKPOINT 5.{i+1}/{len(benchmarks)}] {benchmark} completed, score: {score:.4f}")
-    
+
     avg_score = sum(results.values()) / len(results) if results else 0.0
     results['average'] = avg_score
     logger.info(f">>> [CHECKPOINT 6/6] All evaluations completed, average score: {avg_score:.4f}")
-    
+
     del model
     del tokenizer
     torch.cuda.empty_cache()
-    
+
     return results
 
 
