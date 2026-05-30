@@ -457,9 +457,15 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda"):
         elif benchmark_name == "mbpp":
             dataset = load_dataset("mbpp", split="test")
         elif benchmark_name == "humaneval_plus":
-            dataset = load_dataset("evalplus/humaneval_plus", split="test")
+            from evalplus.data import get_human_eval_plus
+            problems = get_human_eval_plus()
+            dataset = [{"prompt": v["prompt"], "test": v["test"], "entry_point": v.get("entry_point", "")}
+                       for v in problems.values()]
         elif benchmark_name == "mbpp_plus":
-            dataset = load_dataset("evalplus/mbpp_plus", split="test")
+            from evalplus.data import get_mbpp_plus
+            problems = get_mbpp_plus()
+            dataset = [{"prompt": v["prompt"], "test": v["test"], "entry_point": v.get("entry_point", "")}
+                       for v in problems.values()]
         else:
             logger.warning(f"Unknown benchmark: {benchmark_name}")
             return 0.0
@@ -472,9 +478,11 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda"):
         print(f"  [锚点] {benchmark_name}: 开始评测 {total} 题 | {datetime.now().strftime('%H:%M:%S')}")
 
         model.eval()
-        for i, example in enumerate(dataset.select(range(total))):
+        for i in range(total):
+            example = dataset[i]
             prompt = example.get('prompt', '')
             test = example.get('test', '')
+            entry_point = example.get('entry_point', '')
 
             inputs = tokenizer(prompt, return_tensors="pt").to(device)
             input_len = inputs.input_ids.shape[1]
@@ -565,7 +573,7 @@ def run_experiment(model_name, dataset, algorithm_name="DGMM", num_epochs=3, bat
     tokenizer.save_pretrained(ckpt_dir)
     logger.info(f">>> [CHECKPOINT 4.5] Model saved ✓")
 
-    benchmarks = ["humaneval", "mbpp"]  # hf-mirror 无 evalplus，仅跑可用基准
+    benchmarks = ["humaneval", "mbpp", "humaneval_plus", "mbpp_plus"]
     results = {}
     for i, benchmark in enumerate(benchmarks):
         logger.info(f">>> [CHECKPOINT 5.{i+1}/{len(benchmarks)}] Evaluating on {benchmark}...")
@@ -590,7 +598,7 @@ def main():
         "mistralai/Mistral-7B-v0.1",
         # "deepseek-ai/DeepSeek-Coder-Base-6.7B",  # 先注释掉，跑完一个再看
     ]
-    benchmarks = ["HumanEval", "MBPP", "Average"]
+    benchmarks = ["HumanEval", "MBPP", "HumanEval+", "MBPP+", "Average"]
 
     logger.info(f"===== Starting Code Generation Experiment - {algorithm_name} =====")
     logger.info(f"Algorithm: {algorithm_name}")
@@ -618,6 +626,8 @@ def main():
                 "Algorithm": algorithm_name,
                 "HumanEval": results.get('humaneval', 0.0),
                 "MBPP": results.get('mbpp', 0.0),
+                "HumanEval+": results.get('humaneval_plus', 0.0),
+                "MBPP+": results.get('mbpp_plus', 0.0),
                 "Average": results.get('average', 0.0)
             })
 
@@ -627,7 +637,7 @@ def main():
 
     with open(csv_filename, "w", newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
-        writer.writerow(["Model", "Algorithm", "HumanEval", "MBPP", "Average"])
+        writer.writerow(["Model", "Algorithm", "HumanEval", "MBPP", "HumanEval+", "MBPP+", "Average"])
 
         for result in all_results:
             writer.writerow([
@@ -635,6 +645,8 @@ def main():
                 result["Algorithm"],
                 f"{result['HumanEval']:.4f}",
                 f"{result['MBPP']:.4f}",
+                f"{result['HumanEval+']:.4f}",
+                f"{result['MBPP+']:.4f}",
                 f"{result['Average']:.4f}"
             ])
 
@@ -647,6 +659,8 @@ def main():
         print(f"\n{result['Model']} - {result['Algorithm']}:")
         print(f"  HumanEval:  {result['HumanEval']:.4f}")
         print(f"  MBPP:       {result['MBPP']:.4f}")
+        print(f"  HumanEval+: {result['HumanEval+']:.4f}")
+        print(f"  MBPP+:      {result['MBPP+']:.4f}")
         print(f"  Average:    {result['Average']:.4f}")
 
 
