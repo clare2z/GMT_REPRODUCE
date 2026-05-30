@@ -1,19 +1,20 @@
+import os
+
+# ⚠️ 必须在 import transformers / datasets 之前设置，否则 huggingface_hub 已用默认地址初始化
+if os.environ.get("HF_ENDPOINT") is None:
+    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import logging
 import csv
-import os
 from datetime import datetime
 from typing import Dict, Tuple
 import time
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from datasets import load_dataset
-
-# 国内服务器用 HF 镜像，避免网络不通导致评测全零
-if os.environ.get("HF_ENDPOINT") is None:
-    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -564,7 +565,7 @@ def run_experiment(model_name, dataset, algorithm_name="DGMM", num_epochs=3, bat
     tokenizer.save_pretrained(ckpt_dir)
     logger.info(f">>> [CHECKPOINT 4.5] Model saved ✓")
 
-    benchmarks = ["humaneval", "mbpp", "humaneval_plus", "mbpp_plus"]
+    benchmarks = ["humaneval", "mbpp"]  # hf-mirror 无 evalplus，仅跑可用基准
     results = {}
     for i, benchmark in enumerate(benchmarks):
         logger.info(f">>> [CHECKPOINT 5.{i+1}/{len(benchmarks)}] Evaluating on {benchmark}...")
@@ -589,7 +590,7 @@ def main():
         "mistralai/Mistral-7B-v0.1",
         # "deepseek-ai/DeepSeek-Coder-Base-6.7B",  # 先注释掉，跑完一个再看
     ]
-    benchmarks = ["HumanEval", "MBPP", "HumanEval+", "MBPP+", "Average"]
+    benchmarks = ["HumanEval", "MBPP", "Average"]
 
     logger.info(f"===== Starting Code Generation Experiment - {algorithm_name} =====")
     logger.info(f"Algorithm: {algorithm_name}")
@@ -617,8 +618,6 @@ def main():
                 "Algorithm": algorithm_name,
                 "HumanEval": results.get('humaneval', 0.0),
                 "MBPP": results.get('mbpp', 0.0),
-                "HumanEval+": results.get('humaneval_plus', 0.0),
-                "MBPP+": results.get('mbpp_plus', 0.0),
                 "Average": results.get('average', 0.0)
             })
 
@@ -628,7 +627,7 @@ def main():
 
     with open(csv_filename, "w", newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
-        writer.writerow(["Model", "Algorithm", "HumanEval", "MBPP", "HumanEval+", "MBPP+", "Average"])
+        writer.writerow(["Model", "Algorithm", "HumanEval", "MBPP", "Average"])
 
         for result in all_results:
             writer.writerow([
@@ -636,8 +635,6 @@ def main():
                 result["Algorithm"],
                 f"{result['HumanEval']:.4f}",
                 f"{result['MBPP']:.4f}",
-                f"{result['HumanEval+']:.4f}",
-                f"{result['MBPP+']:.4f}",
                 f"{result['Average']:.4f}"
             ])
 
@@ -650,8 +647,6 @@ def main():
         print(f"\n{result['Model']} - {result['Algorithm']}:")
         print(f"  HumanEval:  {result['HumanEval']:.4f}")
         print(f"  MBPP:       {result['MBPP']:.4f}")
-        print(f"  HumanEval+: {result['HumanEval+']:.4f}")
-        print(f"  MBPP+:      {result['MBPP+']:.4f}")
         print(f"  Average:    {result['Average']:.4f}")
 
 
