@@ -15,9 +15,10 @@ def clean_code(text):
     first_def = re.search(r'\n(def )', code)
     if first_def and first_def.start() > 50:
         code = code[first_def.start()+1:].strip()
-    lines = code.split('\n')
-    if lines and '"""' in lines[-1] and not lines[-1].strip().endswith('"""'):
-        code = '\n'.join(lines[:-1])
+    triple_count = code.count('"""')
+    if triple_count % 2 != 0:
+        last_triple = code.rfind('"""')
+        code = code[:last_triple].rstrip()
     return code
 
 model_path = "checkpoints/mistralai_Mistral-7B-v0.1_DGMM"

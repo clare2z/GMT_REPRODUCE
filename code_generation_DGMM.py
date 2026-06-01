@@ -473,12 +473,12 @@ def _clean_generated_code(text: str) -> str:
         if first_def and first_def.start() > 50:
             code = code[first_def.start() + 1:].strip()
 
-    # 5. 截断未闭合的三引号导致的语法错（去掉最后一行如果它以 """ 开头但后面没有闭合的 """）
-    lines = code.split('\n')
-    if lines and lines[-1].strip().startswith('"""') and lines[-1].strip().endswith('"""') and len(lines) > 1:
-        pass  # 正常闭合的 docstring
-    elif lines and '"""' in lines[-1] and not lines[-1].strip().endswith('"""'):
-        code = '\n'.join(lines[:-1])
+    # 5. 修复未闭合的三引号：统计 """ 出现次数，奇数则截断到最后一个 """ 之前
+    triple_count = code.count('"""')
+    if triple_count % 2 != 0:
+        # 三引号不配对，删掉最后一个 """ 及之后的所有内容
+        last_triple = code.rfind('"""')
+        code = code[:last_triple].rstrip()
 
     return code
 
