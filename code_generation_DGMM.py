@@ -133,6 +133,7 @@ class DGMMFramework:
         self.global_importance_threshold = 0.5
 
         self.grad_history: Dict[str, list] = {}
+        self.step_count = 0  # warmup 计数器
 
         # 将梯度编码特征(64维) + 统计特征(6维: 正/负/零比例 + 标准差/波动/动量) 融合
         self.feature_fusion = nn.Linear(encoder_output_dim + 6, encoder_output_dim).to(device).to(dtype)
@@ -279,13 +280,23 @@ class DGMMFramework:
         self.meta_optimizer.step()
 
         masked_grads = {}
+        warmup_steps = 500  # 前500步不介入，让模型先正常学习
+        self.step_count += 1
+
         for name, grad in accumulated_grads.items():
             layer_name = name.split('.')[0]
             importance = self.layer_importance.get(layer_name, self.global_importance_threshold)
 
-            # 重要性加权：重要性高 → 梯度保留多；重要性低 → 梯度衰减多
-            # 夹到 [0.1, 1.0] 防止完全归零
             weight = max(0.1, min(1.0, importance))
+
+            # warmup: 前 warmup_steps 步不干扰，之后渐进引入 DGMM 权重
+            if self.step_count <= warmup_steps:
+                weight = 1.0  # 完全不介入
+            else:
+                # 渐进过渡：ramp over next 500 steps
+                ramp = min(1.0, (self.step_count - warmup_steps) / 500.0)
+                weight = 1.0 - ramp * (1.0 - weight)
+
             masked_grads[name] = grad * weight
 
         info = {
