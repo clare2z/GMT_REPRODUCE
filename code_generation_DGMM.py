@@ -283,6 +283,11 @@ class DGMMFramework:
         warmup_steps = 500  # 前500步不介入，让模型先正常学习
         self.step_count += 1
 
+        # 调试开关：DGMM_DISABLED=1 则完全不干预梯度，验证 baseline
+        if os.environ.get("DGMM_DISABLED") == "1":
+            return accumulated_grads, {'avg_importance': 1.0, 'layer_corr': 0.0,
+                                        'contrastive_loss': 0.0, 'consistency_loss': 0.0}
+
         for name, grad in accumulated_grads.items():
             layer_name = name.split('.')[0]
             importance = self.layer_importance.get(layer_name, self.global_importance_threshold)
