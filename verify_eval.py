@@ -1,10 +1,19 @@
 """快速验证：加载已训练模型，用正确格式评测 10 题 HumanEval"""
-import os
+import os, re
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from datasets import load_dataset
+
+def clean_code(text):
+    code = text.strip()
+    md = re.search(r'```(?:python)?\s*\n(.*?)\n```', code, re.DOTALL)
+    if md: code = md.group(1).strip()
+    first_def = re.search(r'\n(def )', code)
+    if first_def and first_def.start() > 50:
+        code = code[first_def.start()+1:].strip()
+    return code
 
 model_path = "checkpoints/mistralai_Mistral-7B-v0.1_DGMM"
 if not os.path.exists(model_path):
@@ -41,6 +50,7 @@ for i in range(total):
                                  pad_token_id=tokenizer.eos_token_id)
 
     gen = tokenizer.decode(outputs[0][input_len:], skip_special_tokens=True)
+    gen = clean_code(gen)  # 清洗 markdown 和解释文字
     # exec
     try:
         exec(prompt + gen + "\n" + test, {})

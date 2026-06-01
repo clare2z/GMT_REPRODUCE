@@ -448,6 +448,32 @@ def load_model(model_name, device="cuda", use_quantization=False):
     return model, tokenizer
 
 
+def _clean_generated_code(text: str) -> str:
+    """清洗生成代码：去除markdown包装、解释性文字等"""
+    import re
+    code = text.strip()
+
+    # 1. 提取 markdown 代码块中的代码
+    md_match = re.search(r'```(?:python)?\s*\n(.*?)\n```', code, re.DOTALL)
+    if md_match:
+        code = md_match.group(1).strip()
+
+    # 2. 去除开头的 "Here is..." / "The solution..." 等解释文字，以 def / class / import / from 为界
+    match = re.search(r'\n(def |class |import |from |\nif |\nfor |\nwhile )', code)
+    if match:
+        prefix_end = match.start() + 1  # 保留换行符
+        if prefix_end > 100:  # 超过 100 字符的解释文字才需要切
+            code = code[prefix_end:].strip()
+
+    # 3. 如果以 def/class/import 之外的文字开头且很长，尝试定位第一个 def
+    if not re.match(r'(def |class |import |from |[ \t]+)', code):
+        first_def = re.search(r'\n(def |class )', code)
+        if first_def and first_def.start() > 50:
+            code = code[first_def.start()+1:].strip()
+
+    return code
+
+
 def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda"):
     logger.info(f"Evaluating on {benchmark_name}...")
 
@@ -484,7 +510,10 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda"):
             test = example.get('test', '')
             entry_point = example.get('entry_point', '')
 
-            inputs = tokenizer(prompt, return_tensors="pt").to(device)
+            # 训练格式: "### Instruction:\n{instruction}\n\n### Response:\n{response}"
+            # 评测时也必须用同样格式包裹 prompt，否则模型输出乱码
+            full_prompt = f"### Instruction:\n{prompt}\n\n### Response:\n"
+            inputs = tokenizer(full_prompt, return_tensors="pt").to(device)
             input_len = inputs.input_ids.shape[1]
             outputs = model.generate(
                 **inputs,
@@ -495,6 +524,11 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda"):
             )
             generated_ids = outputs[0][input_len:]
             generated_code = tokenizer.decode(generated_ids, skip_special_tokens=True)
+
+            if not generated_code.strip():
+                continue
+
+            generated_code = _clean_generated_code(generated_code)
 
             if not generated_code.strip():
                 continue
