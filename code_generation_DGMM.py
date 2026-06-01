@@ -449,27 +449,36 @@ def load_model(model_name, device="cuda", use_quantization=False):
 
 
 def _clean_generated_code(text: str) -> str:
-    """清洗生成代码：去除markdown包装、解释性文字等"""
+    """清洗生成代码：去除markdown包装、解释性文字、不完整docstring等"""
     import re
     code = text.strip()
 
-    # 1. 提取 markdown 代码块中的代码
+    # 1. 去除首尾的 markdown 代码块标记（包括开头的 ```python）
+    code = re.sub(r'^```(?:python|python3)?\s*\n?', '', code, flags=re.MULTILINE)
+    code = re.sub(r'\n?```\s*$', '', code)
+
+    # 2. 提取完整 markdown 代码块（如有）
     md_match = re.search(r'```(?:python)?\s*\n(.*?)\n```', code, re.DOTALL)
     if md_match:
         code = md_match.group(1).strip()
 
-    # 2. 去除开头的 "Here is..." / "The solution..." 等解释文字，以 def / class / import / from 为界
+    # 3. 去除开头的解释性文字（"Here is..." / "The solution..."）
     match = re.search(r'\n(def |class |import |from |\nif |\nfor |\nwhile )', code)
-    if match:
-        prefix_end = match.start() + 1  # 保留换行符
-        if prefix_end > 100:  # 超过 100 字符的解释文字才需要切
-            code = code[prefix_end:].strip()
+    if match and match.start() > 80:
+        code = code[match.start() + 1:].strip()
 
-    # 3. 如果以 def/class/import 之外的文字开头且很长，尝试定位第一个 def
+    # 4. 定位第一个 def/class/import
     if not re.match(r'(def |class |import |from |[ \t]+)', code):
         first_def = re.search(r'\n(def |class )', code)
         if first_def and first_def.start() > 50:
-            code = code[first_def.start()+1:].strip()
+            code = code[first_def.start() + 1:].strip()
+
+    # 5. 截断未闭合的三引号导致的语法错（去掉最后一行如果它以 """ 开头但后面没有闭合的 """）
+    lines = code.split('\n')
+    if lines and lines[-1].strip().startswith('"""') and lines[-1].strip().endswith('"""') and len(lines) > 1:
+        pass  # 正常闭合的 docstring
+    elif lines and '"""' in lines[-1] and not lines[-1].strip().endswith('"""'):
+        code = '\n'.join(lines[:-1])
 
     return code
 

@@ -8,11 +8,16 @@ from datasets import load_dataset
 
 def clean_code(text):
     code = text.strip()
+    code = re.sub(r'^```(?:python|python3)?\s*\n?', '', code, flags=re.MULTILINE)
+    code = re.sub(r'\n?```\s*$', '', code)
     md = re.search(r'```(?:python)?\s*\n(.*?)\n```', code, re.DOTALL)
     if md: code = md.group(1).strip()
     first_def = re.search(r'\n(def )', code)
     if first_def and first_def.start() > 50:
         code = code[first_def.start()+1:].strip()
+    lines = code.split('\n')
+    if lines and '"""' in lines[-1] and not lines[-1].strip().endswith('"""'):
+        code = '\n'.join(lines[:-1])
     return code
 
 model_path = "checkpoints/mistralai_Mistral-7B-v0.1_DGMM"
