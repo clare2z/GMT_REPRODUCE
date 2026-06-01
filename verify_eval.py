@@ -1,4 +1,4 @@
-"""快速验证：加载已训练模型，用正确格式评测 10 题 HumanEval"""
+"""对比验证：DGMM训练后模型 vs 原版Mistral-7B baseline"""
 import os, re
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
@@ -21,50 +21,62 @@ def clean_code(text):
         code = code[:last_triple].rstrip()
     return code
 
-model_path = "checkpoints/mistralai_Mistral-7B-v0.1_DGMM"
-if not os.path.exists(model_path):
-    print("❌ 没找到已训练模型，先测 baseline（原版 Mistral-7B）")
-    model_path = "/root/autodl-tmp/model/Mistral-7B-v0___1"
-    if not os.path.exists(model_path):
-        model_path = "mistralai/Mistral-7B-v0.1"
+def test_model(model, tokenizer, label, total=10):
+    dataset = load_dataset("openai_humaneval", split="test")
+    correct = 0
+    for i in range(total):
+        ex = dataset[i]
+        prompt = ex["prompt"]
+        test = ex["test"]
+        full_prompt = f"### Instruction:\n{prompt}\n\n### Response:\n"
+        inputs = tokenizer(full_prompt, return_tensors="pt").to("cuda")
+        input_len = inputs.input_ids.shape[1]
+        with torch.no_grad():
+            outputs = model.generate(**inputs, max_new_tokens=256, temperature=0.0, top_k=1,
+                                     pad_token_id=tokenizer.eos_token_id)
+        gen = tokenizer.decode(outputs[0][input_len:], skip_special_tokens=True)
+        gen = clean_code(gen)
+        try:
+            exec(prompt + gen + "\n" + test, {})
+            correct += 1
+            print(f"[{label}] ✅ #{i+1}")
+        except Exception as e:
+            print(f"[{label}] ❌ #{i+1} | gen({len(gen)}ch): {repr(gen[:120])} | {str(e)[:50]}")
+    print(f"[{label}] HumanEval: {correct}/{total} = {correct/total*100:.0f}%\n")
+    return correct
 
-print(f"加载模型: {model_path}")
-tokenizer = AutoTokenizer.from_pretrained(model_path)
-if tokenizer.pad_token is None:
-    tokenizer.pad_token = tokenizer.eos_token
+# --- 测 baseline（原版）---
+print("=" * 50)
+print("1. BASELINE: 原版 Mistral-7B (未经DGMM训练)")
+print("=" * 50)
+base_path = "/root/autodl-tmp/model/Mistral-7B-v0___1"
+if not os.path.exists(base_path):
+    base_path = "mistralai/Mistral-7B-v0.1"
+btok = AutoTokenizer.from_pretrained(base_path)
+if btok.pad_token is None: btok.pad_token = btok.eos_token
+bmod = AutoModelForCausalLM.from_pretrained(base_path, load_in_4bit=True,
+    bnb_4bit_compute_dtype=torch.bfloat16, device_map="auto")
+bmod.eval()
+base_score = test_model(bmod, btok, "BASELINE")
+del bmod; torch.cuda.empty_cache()
 
-model = AutoModelForCausalLM.from_pretrained(
-    model_path, load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16, device_map="auto")
-model.eval()
+# --- 测 DGMM 训练后 ---
+print("=" * 50)
+print("2. DGMM: 训练后模型")
+print("=" * 50)
+ckpt = "checkpoints/mistralai_Mistral-7B-v0.1_DGMM"
+if not os.path.exists(ckpt):
+    print("⚠ 未找到训练模型，跳过")
+    dgmm_score = -1
+else:
+    dtok = AutoTokenizer.from_pretrained(ckpt)
+    if dtok.pad_token is None: dtok.pad_token = dtok.eos_token
+    dmod = AutoModelForCausalLM.from_pretrained(ckpt, load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.bfloat16, device_map="auto")
+    dmod.eval()
+    dgmm_score = test_model(dmod, dtok, "DGMM")
+    del dmod; torch.cuda.empty_cache()
 
-dataset = load_dataset("openai_humaneval", split="test")
-correct = 0
-total = 10
-
-for i in range(total):
-    ex = dataset[i]
-    prompt = ex["prompt"]
-    test = ex["test"]
-
-    # 训练格式包裹
-    full_prompt = f"### Instruction:\n{prompt}\n\n### Response:\n"
-    inputs = tokenizer(full_prompt, return_tensors="pt").to("cuda")
-    input_len = inputs.input_ids.shape[1]
-
-    with torch.no_grad():
-        outputs = model.generate(**inputs, max_new_tokens=128, temperature=0.0, top_k=1,
-                                 pad_token_id=tokenizer.eos_token_id)
-
-    gen = tokenizer.decode(outputs[0][input_len:], skip_special_tokens=True)
-    gen = clean_code(gen)  # 清洗 markdown 和解释文字
-    # exec
-    try:
-        exec(prompt + gen + "\n" + test, {})
-        correct += 1
-        print(f"✅ #{i+1}")
-    except Exception as e:
-        print(f"❌ #{i+1} | 生成: {gen[:80]}... | 错误: {str(e)[:60]}")
-
-print(f"\nHumanEval: {correct}/{total} = {correct/total*100:.0f}%")
-
-del model; torch.cuda.empty_cache()
+print("=" * 50)
+print(f"BASELINE: {base_score}/10  |  DGMM: {dgmm_score}/10")
+print("=" * 50)
