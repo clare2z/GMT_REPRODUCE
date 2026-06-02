@@ -3,6 +3,9 @@ import os
 # ⚠️ 必须在 import transformers / datasets 之前设置，否则 huggingface_hub 已用默认地址初始化
 if os.environ.get("HF_ENDPOINT") is None:
     os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+# 模型缓存到数据盘，避免系统盘满
+if os.environ.get("HF_HOME") is None:
+    os.environ["HF_HOME"] = "/root/autodl-tmp/hf_cache"
 
 import torch
 import torch.nn as nn
@@ -19,9 +22,9 @@ from datasets import load_dataset
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 本地路径配置
+# 本地路径配置（路径不存在则自动走 HF 镜像下载到数据盘缓存）
 LOCAL_PATHS = {
-    "mistralai/Mistral-7B-v0.1": "/root/autodl-tmp/model/Mistral-7B-v0___1",
+    "mistralai/Mistral-7B-v0.1": "/root/autodl-tmp/model/Mistral-7B-v0.1",
     "deepseek-ai/DeepSeek-Coder-Base-6.7B": "/root/autodl-tmp/model/deepseek-coder-6.7b-base",
     "dataset": "/root/autodl-tmp/dataset/Magicoder-Evol-Instruct-110K"
 }
