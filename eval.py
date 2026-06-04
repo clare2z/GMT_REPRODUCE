@@ -221,6 +221,27 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda", max_s
         if not generated_code.strip():
             continue
 
+        # 如果生成代码开头重复了函数签名（MBPP 常见），去掉第一行 def
+        if entry_point and generated_code.strip().startswith('def ' + entry_point):
+            generated_code = generated_code.strip().split('\n', 1)[1] if '\n' in generated_code else ''
+
+        # 截掉尾部的自然语言解释：只保留缩进行和代码关键字开头的行
+        lines = generated_code.split('\n')
+        code_lines = []
+        for line in lines:
+            s = line.strip()
+            if s == '':
+                code_lines.append(line)
+            elif line[0] in (' ', '\t') or s.startswith(('return ', 'if ', 'for ', 'while ', '#', 'else:', 'elif ', 'try:', 'except:', 'with ')):
+                code_lines.append(line)
+            elif code_lines and s and s[0].isupper():
+                break  # 自然语言解释
+            else:
+                code_lines.append(line)
+        generated_code = '\n'.join(code_lines).rstrip()
+        if not generated_code.strip():
+            continue
+
         total_generated += 1
 
         # 前 3 个样本打印（含 test 预览用于调试）
