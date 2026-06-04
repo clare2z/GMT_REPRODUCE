@@ -177,8 +177,9 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda", max_s
         prompt = example.get('prompt', '') or example.get('text', '')
         entry_point = example.get('entry_point', '')
 
-        # test: HumanEval=test(string), MBPP=test_list(list)
-        test = example.get('test', '')
+        # test 字段统一提取（不同数据集字段名不同）
+        # HumanEval → test(string), MBPP → test_list(list), MBPP+ → assertion(string)
+        test = example.get('test', '') or example.get('assertion', '')
         if not test:
             test_list = example.get('test_list', [])
             test_imports = example.get('test_imports', '')
