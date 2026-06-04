@@ -25,10 +25,30 @@ import re
 import logging
 import csv
 import time
+import signal
 import argparse
+from contextlib import contextmanager
 from datetime import datetime
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from datasets import load_dataset
+
+
+class ExecTimeoutError(Exception):
+    pass
+
+
+@contextmanager
+def exec_timeout(seconds: int):
+    """exec 超时保护，防止模型生成的无限循环代码卡住评测"""
+    def _handler(signum, frame):
+        raise ExecTimeoutError("exec timed out")
+    old = signal.signal(signal.SIGALRM, _handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
@@ -264,12 +284,14 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda", max_s
             full_code = prompt + "\n" + generated_code + "\n" + test
             if entry_point and 'check' in test and f"check({entry_point})" not in test:
                 full_code += f"\ncheck({entry_point})"
-            exec(full_code, exec_globals)
+            with exec_timeout(5):
+                exec(full_code, exec_globals)
             correct += 1
         except Exception:
             try:
                 # 路径 2: prompt 是自然语言（MBPP），只用 generated_code + test
-                exec(generated_code + "\n" + test, {})
+                with exec_timeout(5):
+                    exec(generated_code + "\n" + test, {})
                 correct += 1
             except Exception:
                 pass
