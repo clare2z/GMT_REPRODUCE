@@ -61,24 +61,41 @@ def load_magicoder_dataset(subset=None):
 
 
 def preprocess_dataset(dataset, tokenizer, max_length=256):
-    def format_instruction(example):
-        instruction = example.get('instruction', '')
-        response = example.get('response', '')
-        return f"### Instruction:\n{instruction}\n\n### Response:\n{response}"
+    """预处理数据集：只对 response 部分计算 loss，instruction 和 PAD 忽略"""
+    def format_and_tokenize(examples):
+        instructions = examples['instruction']
+        responses = examples['response']
 
-    dataset = dataset.map(lambda x: {"text": format_instruction(x)})
+        # 完整文本
+        full_texts = [f"### Instruction:\n{inst}\n\n### Response:\n{resp}"
+                      for inst, resp in zip(instructions, responses)]
+        tokenized = tokenizer(full_texts, truncation=True, max_length=max_length, padding="max_length")
 
-    def tokenize_function(examples):
-        return tokenizer(examples["text"], truncation=True, max_length=max_length, padding="max_length")
+        # 构建 labels：只计算 response 部分的 loss
+        labels = []
+        for i, (inst, resp) in enumerate(zip(instructions, responses)):
+            # 计算 instruction 前缀的 token 数
+            prefix = f"### Instruction:\n{inst}\n\n### Response:\n"
+            prefix_tokens = tokenizer(prefix, truncation=True, max_length=max_length)["input_ids"]
+            # 去掉 BOS token（tokenizer 自动加的），用实际 token 数对齐
+            prefix_len = len(prefix_tokens) - 1 if tokenizer.bos_token_id is not None else len(prefix_tokens)
 
-    tokenized_dataset = dataset.map(tokenize_function, batched=True)
-    tokenized_dataset = tokenized_dataset.remove_columns(["instruction", "response", "text"])
-    tokenized_dataset = tokenized_dataset.rename_column("input_ids", "labels")
-    return tokenized_dataset
+            input_ids = tokenized["input_ids"][i]
+            label = [-100] * len(input_ids)
+            for j in range(prefix_len, len(input_ids)):
+                if input_ids[j] != tokenizer.pad_token_id:
+                    label[j] = input_ids[j]
+            labels.append(label)
+
+        tokenized["labels"] = labels
+        return tokenized
+
+    dataset = dataset.map(format_and_tokenize, batched=True, remove_columns=["instruction", "response"])
+    return dataset
 
 
 def create_dataloader(dataset, batch_size=4):
-    dataset.set_format(type="torch", columns=["labels", "attention_mask"])
+    dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
     return torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
 
@@ -122,7 +139,7 @@ class SFTTrainer:
         self.model.train()
         total_loss, count = 0.0, 0
         for batch in dataloader:
-            inputs = {"input_ids": batch["labels"].to(self.device), "attention_mask": batch["attention_mask"].to(self.device)}
+            inputs = {"input_ids": batch["input_ids"].to(self.device), "attention_mask": batch["attention_mask"].to(self.device)}
             outputs = self.model(**inputs, labels=batch['labels'].to(self.device))
             self.optimizer.zero_grad()
             outputs.loss.backward()
@@ -146,7 +163,7 @@ class DropTrainer:
         self.model.train()
         total_loss, count = 0.0, 0
         for batch in dataloader:
-            inputs = {"input_ids": batch["labels"].to(self.device), "attention_mask": batch["attention_mask"].to(self.device)}
+            inputs = {"input_ids": batch["input_ids"].to(self.device), "attention_mask": batch["attention_mask"].to(self.device)}
             outputs = self.model(**inputs, labels=batch['labels'].to(self.device))
             self.optimizer.zero_grad()
             outputs.loss.backward()
@@ -171,7 +188,7 @@ class HFTTrainer:
         self.model.train()
         total_loss, count = 0.0, 0
         for batch in dataloader:
-            inputs = {"input_ids": batch["labels"].to(self.device), "attention_mask": batch["attention_mask"].to(self.device)}
+            inputs = {"input_ids": batch["input_ids"].to(self.device), "attention_mask": batch["attention_mask"].to(self.device)}
             outputs = self.model(**inputs, labels=batch['labels'].to(self.device))
             self.optimizer.zero_grad()
             outputs.loss.backward()
@@ -212,7 +229,7 @@ class RMTTrainer:
         self.model.train()
         total_loss, count = 0.0, 0
         for batch in dataloader:
-            inputs = {"input_ids": batch["labels"].to(self.device), "attention_mask": batch["attention_mask"].to(self.device)}
+            inputs = {"input_ids": batch["input_ids"].to(self.device), "attention_mask": batch["attention_mask"].to(self.device)}
             outputs = self.model(**inputs, labels=batch['labels'].to(self.device))
             self.optimizer.zero_grad()
             outputs.loss.backward()
@@ -245,7 +262,7 @@ class GMTTrainer:
         accumulated_grads, step_count = {}, 0
 
         for batch in dataloader:
-            inputs = {"input_ids": batch["labels"].to(self.device), "attention_mask": batch["attention_mask"].to(self.device)}
+            inputs = {"input_ids": batch["input_ids"].to(self.device), "attention_mask": batch["attention_mask"].to(self.device)}
             outputs = self.model(**inputs, labels=batch['labels'].to(self.device))
             loss = outputs.loss / self.accumulation_steps
             loss.backward()
@@ -301,7 +318,7 @@ class DGMMTrainer:
         t_start = time.time()
 
         for batch in dataloader:
-            inputs = {"input_ids": batch["labels"].to(self.device), "attention_mask": batch["attention_mask"].to(self.device)}
+            inputs = {"input_ids": batch["input_ids"].to(self.device), "attention_mask": batch["attention_mask"].to(self.device)}
             labels = batch['labels'].to(self.device)
             outputs = self.model(**inputs, labels=labels)
 
