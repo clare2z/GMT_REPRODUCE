@@ -44,7 +44,7 @@ LOCAL_PATHS = {
 # 数据加载（所有算法共用）
 # ═══════════════════════════════════════════════════════════════
 
-def load_magicoder_dataset():
+def load_magicoder_dataset(subset=None):
     logger.info("Loading Magicoder-Evol-Instruct-110K dataset...")
     dataset_path = LOCAL_PATHS["dataset"]
     if os.path.exists(dataset_path):
@@ -52,7 +52,11 @@ def load_magicoder_dataset():
     else:
         logger.info(f"Local path not found: {dataset_path}, downloading from Hugging Face...")
         dataset = load_dataset("ise-uiuc/Magicoder-Evol-Instruct-110K", split="train")
-    logger.info(f"Dataset loaded with {len(dataset)} samples")
+    if subset and subset < len(dataset):
+        dataset = dataset.select(range(subset))
+        logger.info(f"Dataset subset: {subset} samples")
+    else:
+        logger.info(f"Dataset loaded with {len(dataset)} samples")
     return dataset
 
 
@@ -400,6 +404,8 @@ def main():
     parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument("--k_percent", type=int, default=50)
     parser.add_argument("--accumulation_steps", type=int, default=4)
+    parser.add_argument("--subset", type=int, default=None,
+                        help="只用前 N 条数据（快速验证用，默认全量 110K）")
     args = parser.parse_args()
 
     if args.output_dir is None:
@@ -419,7 +425,7 @@ def main():
 
     # 2. 加载数据
     logger.info(">>> [2/4] Loading dataset...")
-    dataset = load_magicoder_dataset()
+    dataset = load_magicoder_dataset(subset=args.subset)
     preprocessed = preprocess_dataset(dataset, tokenizer, max_length=args.max_length)
     dataloader = create_dataloader(preprocessed, batch_size=args.batch_size)
     logger.info(f">>> [2/4] Dataloader: {len(dataloader)} batches")
