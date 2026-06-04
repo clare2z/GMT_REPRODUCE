@@ -163,13 +163,29 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda", max_s
     t_start = time.time()
     total_generated = 0
 
+    # 检测数据集格式（不同数据集字段名不同）
+    first_ex = dataset[0] if isinstance(dataset, list) else dataset[0]
+    _keys = set(first_ex.keys()) if isinstance(first_ex, dict) else set(dir(first_ex))
+
     logger.info(f"  [{benchmark_name}] Starting {total} problems | {datetime.now().strftime('%H:%M:%S')}")
 
     for i in range(total):
         example = dataset[i]
-        prompt = example.get('prompt', '')
-        test = example.get('test', '')
+
+        # ── 统一字段提取 ──────────────────────────────────────
+        # prompt: humanEval=prompt, MBPP=text
+        prompt = example.get('prompt', '') or example.get('text', '')
         entry_point = example.get('entry_point', '')
+
+        # test: HumanEval=test(string), MBPP=test_list(list)
+        test = example.get('test', '')
+        if not test:
+            test_list = example.get('test_list', [])
+            test_imports = example.get('test_imports', '')
+            if test_list:
+                test = '\n'.join(test_list)
+                if test_imports:
+                    test = test_imports + '\n' + test
 
         # 训练格式一致的 prompt 包装
         full_prompt = f"### Instruction:\n{prompt}\n\n### Response:\n"
@@ -197,27 +213,31 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda", max_s
 
         total_generated += 1
 
-        # 前 3 个样本打印
+        # 前 3 个样本打印（含 test 预览用于调试）
         if i < 3:
             print(f"  [样本 #{i+1}] {benchmark_name}")
             print(f"    prompt[:80]: {prompt[:80]}...")
             print(f"    generated[:120]: {generated_code[:120]}...")
+            print(f"    test[:100]: {test[:100] if test else '(EMPTY)'}...")
             print(f"    ----")
 
         # ── 修复后的评测逻辑 ──────────────────────────────────
+        # HumanEval: prompt=函数签名, test=def check(candidate):...
+        # MBPP:      prompt=自然语言, test=assert 语句列表
+        # HumanEval+: prompt=函数签名, test=测试代码(可能含check调用)
+        # MBPP+:     prompt=函数签名, test=测试代码(含check调用)
+
         try:
-            # HumanEval 路径: prompt 是函数签名（合法 Python）
-            # test 定义了 check(candidate) 但从未调用，需追加 check(entry_point)
+            # 路径 1: prompt 是合法 Python（HumanEval 系），拼接后 exec
             exec_globals = {}
             full_code = prompt + "\n" + generated_code + "\n" + test
-            # ✅ 关键修复：追加 check(entry_point) 真正调用测试
-            if entry_point and f"check({entry_point})" not in test:
+            if entry_point and 'check' in test and f"check({entry_point})" not in test:
                 full_code += f"\ncheck({entry_point})"
             exec(full_code, exec_globals)
             correct += 1
         except Exception:
             try:
-                # MBPP 路径: prompt 是自然语言，只用生成代码 + 测试
+                # 路径 2: prompt 是自然语言（MBPP），只用 generated_code + test
                 exec(generated_code + "\n" + test, {})
                 correct += 1
             except Exception:
