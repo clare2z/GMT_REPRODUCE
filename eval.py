@@ -173,9 +173,18 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda", max_s
         example = dataset[i]
 
         # ── 统一字段提取 ──────────────────────────────────────
-        # prompt: humanEval=prompt, MBPP=text
+        # prompt: humanEval=prompt, MBPP=text（自然语言）/ code（函数签名）
         prompt = example.get('prompt', '') or example.get('text', '')
         entry_point = example.get('entry_point', '')
+
+        # MBPP 特殊处理：从 code 提取函数签名当 prompt，保证函数名与 test 匹配
+        if benchmark_name in ("mbpp", "mbpp_plus") and not entry_point:
+            code = example.get('code', '')
+            # 提取 def 开头的第一行作为函数签名
+            sig_match = re.match(r'^def\s+\w+\s*\([^)]*\)\s*:', code)
+            if sig_match:
+                prompt = sig_match.group(0)  # "def func_name(args):"
+                entry_point = prompt[4:prompt.index('(')].strip()  # "func_name"
 
         # test 字段统一提取（不同数据集字段名不同）
         # HumanEval → test(string), MBPP → test_list(list), MBPP+ → assertion(string)
