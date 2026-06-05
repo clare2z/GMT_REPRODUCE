@@ -1,8 +1,9 @@
 """
 DGMM (Dynamic Gradient Manifold Masking) 核心框架
 
-基于对比学习和自适应掩码的梯度训练方法。
-包含梯度方向分析、稳定性追踪、层间相关性分析、warmup 机制。
+简化版：梯度方向/稳定性/层间相关性的统计量直接计算重要性。
+去除元网络（GradientEncoder/ContrastiveLearner/LayerAttentionFusion），
+改用 0 参数统计公式，保留全部 6 个分析维度 + 2 大创新点。
 """
 
 import os
@@ -14,16 +15,20 @@ import numpy as np
 from typing import Dict, Tuple
 
 
+# ═══════════════════════════════════════════════════════════════
+# 保留旧模块类（向后兼容，新版 DGMMFramework 不再使用）
+# ═══════════════════════════════════════════════════════════════
+
 class GradientEncoder(nn.Module):
-    """梯度编码器：将梯度信息编码到特征空间"""
-    def __init__(self, input_dim: int = 128, hidden_dim: int = 128, output_dim: int = 64):
+    """[已弃用] 梯度编码器"""
+    def __init__(self, input_dim=128, hidden_dim=128, output_dim=64):
         super().__init__()
         self.fc1 = nn.Linear(input_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         self.fc3 = nn.Linear(hidden_dim, output_dim)
         self.norm = nn.LayerNorm(hidden_dim)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         x = F.relu(self.fc1(x))
         x = self.norm(x)
         x = F.relu(self.fc2(x))
@@ -32,130 +37,126 @@ class GradientEncoder(nn.Module):
 
 
 class ContrastiveLearner(nn.Module):
-    """对比学习器：学习梯度流形结构"""
-    def __init__(self, encoder_dim: int = 64, temperature: float = 0.5):
+    """[已弃用] 对比学习器"""
+    def __init__(self, encoder_dim=64, temperature=0.5):
         super().__init__()
         self.temperature = temperature
         self.projection_head = nn.Sequential(
-            nn.Linear(encoder_dim, encoder_dim),
-            nn.ReLU(),
-            nn.Linear(encoder_dim, encoder_dim)
+            nn.Linear(encoder_dim, encoder_dim), nn.ReLU(), nn.Linear(encoder_dim, encoder_dim)
         )
 
-    def forward(self, anchors: torch.Tensor, positives: torch.Tensor, negatives: torch.Tensor) -> torch.Tensor:
-        anchors = self.projection_head(anchors)
-        positives = self.projection_head(positives)
-        negatives = self.projection_head(negatives)
-
-        pos_sim = torch.sum(anchors * positives, dim=-1) / self.temperature
-        neg_sim = torch.mm(anchors, negatives.t()) / self.temperature
-
+    def forward(self, anchors, positives, negatives):
+        a = self.projection_head(anchors)
+        p = self.projection_head(positives)
+        n = self.projection_head(negatives)
+        pos_sim = torch.sum(a * p, dim=-1) / self.temperature
+        neg_sim = torch.mm(a, n.t()) / self.temperature
         logits = torch.cat([pos_sim.unsqueeze(1), neg_sim], dim=1)
-        labels = torch.zeros(anchors.size(0), dtype=torch.long, device=anchors.device)
+        labels = torch.zeros(a.size(0), dtype=torch.long, device=a.device)
         return F.cross_entropy(logits, labels)
 
 
 class LayerAttentionFusion(nn.Module):
-    """层注意力融合：整合多层梯度特征"""
-    def __init__(self, feature_dim: int = 64, num_layers: int = 12):
+    """[已弃用] 层注意力融合"""
+    def __init__(self, feature_dim=64, num_layers=12):
         super().__init__()
         self.query_proj = nn.Linear(feature_dim, feature_dim)
         self.key_proj = nn.Linear(feature_dim, feature_dim)
         self.value_proj = nn.Linear(feature_dim, feature_dim)
         self.output_proj = nn.Linear(feature_dim, feature_dim)
 
-    def forward(self, layer_features: torch.Tensor) -> torch.Tensor:
-        layer_features = layer_features.unsqueeze(0)
-        queries = self.query_proj(layer_features)
-        keys = self.key_proj(layer_features)
-        values = self.value_proj(layer_features)
+    def forward(self, layer_features):
+        x = layer_features.unsqueeze(0)
+        q, k, v = self.query_proj(x), self.key_proj(x), self.value_proj(x)
+        attn = F.softmax(torch.bmm(q, k.transpose(1, 2)) / np.sqrt(x.size(-1)), dim=-1)
+        return self.output_proj(torch.bmm(attn, v)).squeeze(0)
 
-        attn_scores = torch.bmm(queries, keys.transpose(1, 2)) / np.sqrt(layer_features.size(-1))
-        attn_weights = F.softmax(attn_scores, dim=-1)
 
-        fused = torch.bmm(attn_weights, values)
-        fused = self.output_proj(fused)
-
-        return fused.squeeze(0)
-
+# ═══════════════════════════════════════════════════════════════
+# 新版 DGMM 框架 — 纯统计驱动，0 参数元网络
+# ═══════════════════════════════════════════════════════════════
 
 class DGMMFramework:
-    """DGMM 核心框架 — 含梯度方向分析、稳定性追踪、warmup 机制"""
+    """
+    DGMM 核心框架 (简化版)
+
+    两个创新点全部保留：
+    1. 动态梯度建模：方向(正/负/零) + 稳定性(标准差/波动/动量) + 层间协同(皮尔逊相关系数)
+    2. 层自适应更新：每层独立评分，关键层保留更多梯度，低价值层抑制
+
+    重要性评分公式 (6维度 → 1分数):
+        score = +2.0 * pos_ratio      ← 正梯度多 = 主动学习 → 重要
+                -1.5 * neg_ratio      ← 负梯度多 = 反向挣扎 → 降低
+                -0.5 * stability      ← 波动大 = 不稳定 → 降低
+                -1.0 * grad_diff      ← 变化大 = 噪声 → 降低
+                +1.0 * momentum_f     ← 动量↑ = 加速收敛 → 重要
+                +1.0 * 层相关性       ← 其他层协同 → 重要
+
+    皮尔逊相关系数: 层间 z-score 归一化后做点积 → 协方差矩阵 → 全局均值
+    """
 
     def __init__(
         self,
-        encoder_hidden_dim: int = 128,
-        encoder_output_dim: int = 64,
-        contrastive_temperature: float = 0.5,
-        contrastive_weight: float = 0.1,
-        consistency_weight: float = 0.2,
+        encoder_hidden_dim: int = 128,        # 保留兼容
+        encoder_output_dim: int = 64,         # 保留兼容
+        contrastive_temperature: float = 0.5, # 保留兼容
+        contrastive_weight: float = 0.1,      # 保留兼容
+        consistency_weight: float = 0.2,      # 保留兼容
         ema_alpha: float = 0.99,
         device: str = "cuda",
         dtype: torch.dtype = torch.bfloat16,
         grad_history_window: int = 5,
         warmup_steps: int = 500,
-        mask_floor: float = 0.3,
-        meta_lr: float = 1e-5,
+        mask_floor: float = 0.2,
+        meta_lr: float = 1e-5,                # 保留兼容
     ):
         self.device = device
         self.dtype = dtype
         self.encoder_hidden_dim = encoder_hidden_dim
         self.encoder_output_dim = encoder_output_dim
-        self.contrastive_temperature = contrastive_temperature
-        self.contrastive_weight = contrastive_weight
-        self.consistency_weight = consistency_weight
         self.ema_alpha = ema_alpha
         self.grad_history_window = grad_history_window
         self.warmup_steps = warmup_steps
         self.mask_floor = mask_floor
-        self.meta_lr = meta_lr
 
-        self.gradient_encoder = GradientEncoder(
-            input_dim=encoder_hidden_dim,
-            hidden_dim=encoder_hidden_dim,
-            output_dim=encoder_output_dim
-        ).to(device).to(dtype)
-
-        self.contrastive_learner = ContrastiveLearner(
-            encoder_dim=encoder_output_dim,
-            temperature=contrastive_temperature
-        ).to(device).to(dtype)
-
-        self.layer_attention = LayerAttentionFusion(
-            feature_dim=encoder_output_dim,
-            num_layers=12
-        ).to(device).to(dtype)
-
-        # 特征融合层：将 64 维编码特征 + 6 维统计特征 映射回 64 维
-        self.feature_fusion = nn.Linear(encoder_output_dim + 6, encoder_output_dim).to(device).to(dtype)
-
-        self.meta_optimizer = torch.optim.AdamW(
-            list(self.gradient_encoder.parameters()) +
-            list(self.contrastive_learner.parameters()) +
-            list(self.layer_attention.parameters()) +
-            list(self.feature_fusion.parameters()),
-            lr=meta_lr,
-            weight_decay=1e-5
-        )
-
+        # 层重要性追踪
         self.layer_importance: Dict[str, float] = {}
         self.prev_layer_importance: Dict[str, float] = {}
         self.global_importance_threshold = 0.5
 
+        # 梯度历史（稳定性分析用）
         self.grad_history: Dict[str, list] = {}
         self.step_count = 0
 
-    # ── 梯度分析 ──────────────────────────────────────────────
+    # ═══════════════════════════════════════════════════════
+    # 三大梯度分析模块 (创新点一：动态梯度建模)
+    # ═══════════════════════════════════════════════════════
 
     def _analyze_gradient_direction(self, grad: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """分析梯度方向：正/负/零比例"""
+        """
+        梯度变化方向分析
+
+        返回:
+            pos_ratio  — 正梯度比例（参数在前进方向学习）
+            neg_ratio  — 负梯度比例（参数在反向调整）
+            zero_ratio — 零梯度比例（参数收敛或停滞）
+        """
         positive_ratio = (grad > 0).float().mean()
         negative_ratio = (grad < 0).float().mean()
         zero_ratio = (grad == 0).float().mean()
         return positive_ratio, negative_ratio, zero_ratio
 
     def _analyze_gradient_stability(self, layer_name: str, current_grad: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """分析梯度稳定性：标准差/波动/动量"""
+        """
+        梯度波动频率与长期稳定性分析
+
+        维护最近 5 步的梯度范数历史，计算：
+            grad_std  — 标准差（波动频率，小 = 稳定）
+            grad_diff — 最近两步变化幅度（瞬时波动）
+            momentum  — 变化加速度（>1 = 加速变化，<1 = 减速稳定）
+
+        返回: (grad_std, grad_diff, momentum) 均为标量 tensor
+        """
         if layer_name not in self.grad_history:
             self.grad_history[layer_name] = []
 
@@ -169,13 +170,13 @@ class DGMMFramework:
             grad_std = float(np.std(self.grad_history[layer_name]))
 
             if len(self.grad_history[layer_name]) >= 2:
-                recent_grad_norm = self.grad_history[layer_name][-1]
-                prev_grad_norm = self.grad_history[layer_name][-2]
-                grad_diff = float(np.abs(recent_grad_norm - prev_grad_norm))
+                recent = self.grad_history[layer_name][-1]
+                prev = self.grad_history[layer_name][-2]
+                grad_diff = float(np.abs(recent - prev))
 
                 if len(self.grad_history[layer_name]) >= 3:
-                    prev_prev_grad_norm = self.grad_history[layer_name][-3]
-                    prev_diff = np.abs(prev_grad_norm - prev_prev_grad_norm)
+                    prev_prev = self.grad_history[layer_name][-3]
+                    prev_diff = abs(prev - prev_prev)
                     momentum = float(grad_diff / (prev_diff + 1e-8))
 
         self.grad_history[layer_name].append(current_grad_norm)
@@ -189,26 +190,32 @@ class DGMMFramework:
         )
 
     def _analyze_layer_correlation(self, layer_features: torch.Tensor) -> torch.Tensor:
-        """计算层间皮尔逊相关系数"""
+        """
+        Transformer 层之间的梯度协同关系
+
+        对每层特征做 z-score 归一化 → 皮尔逊相关系数矩阵 → 全局平均
+
+        含义：不同层梯度变化方向的一致性。高相关 = 层间协作学习，低相关 = 各层独立更新。
+        """
         num_layers = layer_features.size(0)
         if num_layers < 2:
             return torch.tensor(0.0, device=self.device)
 
-        normalized_features = (layer_features - layer_features.mean(dim=1, keepdim=True)) / (layer_features.std(dim=1, keepdim=True) + 1e-8)
-        correlation_matrix = torch.mm(normalized_features, normalized_features.t()) / self.encoder_output_dim
-        avg_correlation = correlation_matrix.mean()
-        return avg_correlation
+        normalized = (layer_features - layer_features.mean(dim=1, keepdim=True)) / (layer_features.std(dim=1, keepdim=True) + 1e-8)
+        correlation_matrix = torch.mm(normalized, normalized.t()) / self.encoder_output_dim
+        return correlation_matrix.mean()
 
-    # ── 核心流程 ──────────────────────────────────────────────
+    # ═══════════════════════════════════════════════════════
+    # 层分组
+    # ═══════════════════════════════════════════════════════
 
     def _compute_layer_gradients(self, accumulated_grads: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """将梯度按 transformer 层块分组（每 8 层一组，分成 4 个 block）"""
+        """将梯度按 transformer 层块分组（每 8 层一组，32 层 → 4 block）"""
         layer_grads = {}
         for name, grad in accumulated_grads.items():
             match = re.search(r'layers\.(\d+)', name)
             if match:
-                layer_idx = int(match.group(1))
-                block_idx = layer_idx // 8  # 32层 → 4个 block
+                block_idx = int(match.group(1)) // 8
                 layer_name = f"block_{block_idx}"
             else:
                 layer_name = name.split('.')[1] if '.' in name else name.split('.')[0]
@@ -221,43 +228,64 @@ class DGMMFramework:
 
         return layer_grads
 
-    def _extract_layer_features(self, layer_grads: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """提取层特征：编码梯度 + 统计特征融合"""
-        layer_features = []
+    # ═══════════════════════════════════════════════════════
+    # 核心：统计公式算重要性 (替代元网络)
+    # ═══════════════════════════════════════════════════════
 
-        for layer_name in sorted(layer_grads.keys()):
+    def _compute_importance_scores(self, layer_grads: Dict[str, torch.Tensor]) -> Tuple[Dict[str, float], float]:
+        """
+        创新点二：层自适应参数更新
+
+        对每层独立分析 6 个统计维度，用逻辑公式计算重要性分数。
+        不需要神经网络——统计量的数学含义直接映射到重要性权重。
+
+        公式：
+            raw = +2.0 * pos  -1.5 * neg  -0.5 * std  -1.0 * diff  +1.0 * mom  +1.0 * corr
+            importance = sigmoid(raw)  →  (0, 1)
+        """
+        layer_names = sorted(layer_grads.keys())
+        scores = {}
+
+        # 先构建简易特征向量用于层间相关性计算
+        feat_list = []
+        for layer_name in layer_names:
             grad = layer_grads[layer_name]
-
-            # 方向特征(3) + 稳定性特征(3) → 6 维统计向量
-            pos_ratio, neg_ratio, zero_ratio = self._analyze_gradient_direction(grad)
-            stability, grad_diff, momentum = self._analyze_gradient_stability(layer_name, grad)
-
-            stats = torch.stack([
-                pos_ratio.detach(), neg_ratio.detach(), zero_ratio.detach(),
-                stability.detach(), grad_diff.detach(), momentum.detach()
+            pos, neg, zero = self._analyze_gradient_direction(grad)
+            std, diff, mom = self._analyze_gradient_stability(layer_name, grad)
+            # 6 维统计量组合为特征向量 (64 维以兼容 correlation)
+            full_feat = torch.cat([
+                torch.stack([pos, neg, zero, std, diff, mom]).to(self.dtype),
+                torch.zeros(self.encoder_output_dim - 6, device=self.device, dtype=self.dtype)
             ])
+            feat_list.append(full_feat.unsqueeze(0))
 
-            # 分块平均到固定维度，保留全量梯度信号
-            if grad.size(0) < self.encoder_hidden_dim:
-                grad = F.pad(grad, (0, self.encoder_hidden_dim - grad.size(0)))
-            else:
-                chunk_size = grad.size(0) // self.encoder_hidden_dim
-                grad = grad[:chunk_size * self.encoder_hidden_dim].view(self.encoder_hidden_dim, -1).mean(dim=1)
+        layer_features = torch.cat(feat_list, dim=0)
+        layer_corr = self._analyze_layer_correlation(layer_features)
 
-            # 编码 + 融合
-            base_features = self.gradient_encoder(grad.unsqueeze(0).to(self.dtype))
-            fused = self.feature_fusion(torch.cat([base_features.squeeze(0), stats.to(self.dtype)], dim=0))
+        # 逐层计算重要性
+        for i, layer_name in enumerate(layer_names):
+            grad = layer_grads[layer_name]
+            pos, neg, zero = self._analyze_gradient_direction(grad)
+            std, diff, mom = self._analyze_gradient_stability(layer_name, grad)
 
-            layer_features.append(fused.unsqueeze(0))
+            # ── 6 维度统计公式 ──────────────────────────────
+            raw_score = (
+                + 2.0 * pos.item()                        # 正梯度多 → 主动学习
+                - 1.5 * neg.item()                        # 负梯度多 → 反向挣扎
+                - 0.5 * std.item()                        # 波动大 → 不稳定
+                - 1.0 * diff.item()                       # 变化幅度大 → 噪声
+                + 1.0 * min(mom.item(), 3.0)              # 动量↑(≤3) → 加速收敛
+                + 1.0 * layer_corr.item()                 # 层间协同 → 重要
+            )
 
-        return torch.cat(layer_features, dim=0)
+            importance = float(torch.sigmoid(torch.tensor(raw_score)))
+            scores[layer_name] = importance
 
-    def _build_contrastive_samples(self, layer_features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """构建对比学习样本"""
-        anchors = layer_features
-        positives = layer_features.roll(1, dims=0)
-        negatives = layer_features[torch.randperm(layer_features.size(0))]
-        return anchors, positives, negatives
+        return scores, layer_corr.item()
+
+    # ═══════════════════════════════════════════════════════
+    # 掩码应用
+    # ═══════════════════════════════════════════════════════
 
     def apply_mask(self, accumulated_grads: Dict[str, torch.Tensor]) -> Tuple[Dict[str, torch.Tensor], Dict]:
         """
@@ -266,7 +294,7 @@ class DGMMFramework:
         Returns:
             (masked_grads, info_dict)
         """
-        # 调试开关：DGMM_DISABLED=1 则完全不干预梯度
+        # DGMM_DISABLED=1 则完全不干预梯度
         if os.environ.get("DGMM_DISABLED") == "1":
             return accumulated_grads, {
                 'avg_importance': 1.0, 'layer_corr': 0.0,
@@ -274,56 +302,42 @@ class DGMMFramework:
             }
 
         layer_grads = self._compute_layer_gradients(accumulated_grads)
-        layer_features = self._extract_layer_features(layer_grads)
+        importance_scores, layer_corr = self._compute_importance_scores(layer_grads)
 
-        layer_correlation = self._analyze_layer_correlation(layer_features)
-
-        anchors, positives, negatives = self._build_contrastive_samples(layer_features)
-        contrastive_loss = self.contrastive_learner(anchors, positives, negatives)
-
-        fused_features = self.layer_attention(layer_features)
-        importance_scores = torch.sigmoid(torch.mean(fused_features, dim=-1))
-
-        avg_importance = importance_scores.mean().item()
-
+        # EMA 平滑 + 一致性追踪
+        avg_importance = sum(importance_scores.values()) / max(1, len(importance_scores))
         consistency_loss = 0.0
-        for i, layer_name in enumerate(sorted(layer_grads.keys())):
-            importance = importance_scores[i].item()
+
+        for layer_name in sorted(layer_grads.keys()):
+            imp = importance_scores.get(layer_name, self.global_importance_threshold)
             if layer_name in self.prev_layer_importance:
-                consistency_loss += (importance - self.prev_layer_importance[layer_name]) ** 2
+                consistency_loss += (imp - self.prev_layer_importance[layer_name]) ** 2
 
             if layer_name in self.layer_importance:
-                self.layer_importance[layer_name] = self.ema_alpha * self.layer_importance[layer_name] + (1 - self.ema_alpha) * importance
+                self.layer_importance[layer_name] = self.ema_alpha * self.layer_importance[layer_name] + (1 - self.ema_alpha) * imp
             else:
-                self.layer_importance[layer_name] = importance
+                self.layer_importance[layer_name] = imp
 
-            self.prev_layer_importance[layer_name] = importance
-
-        total_meta_loss = (
-            self.contrastive_weight * contrastive_loss +
-            self.consistency_weight * consistency_loss -
-            0.05 * layer_correlation
-        )
-
-        self.meta_optimizer.zero_grad()
-        total_meta_loss.backward()
-        self.meta_optimizer.step()
+            self.prev_layer_importance[layer_name] = imp
 
         # ── 掩码应用 + warmup ──────────────────────────────────
         masked_grads = {}
         self.step_count += 1
 
         for name, grad in accumulated_grads.items():
-            layer_name = name.split('.')[0]
-            importance = self.layer_importance.get(layer_name, self.global_importance_threshold)
+            match = re.search(r'layers\.(\d+)', name)
+            if match:
+                layer_name = f"block_{int(match.group(1)) // 8}"
+            else:
+                layer_name = name.split('.')[1] if '.' in name else name.split('.')[0]
 
+            importance = self.layer_importance.get(layer_name, self.global_importance_threshold)
             weight = max(self.mask_floor, min(1.0, importance))
 
             # warmup: 前 warmup_steps 步不干扰，之后渐进引入
             if self.step_count <= self.warmup_steps:
                 weight = 1.0
             else:
-                # ramp 长度 = warmup_steps，比例自适应
                 ramp = min(1.0, (self.step_count - self.warmup_steps) / max(1, self.warmup_steps))
                 weight = 1.0 - ramp * (1.0 - weight)
 
@@ -331,8 +345,8 @@ class DGMMFramework:
 
         info = {
             'avg_importance': avg_importance,
-            'layer_corr': layer_correlation.item(),
-            'contrastive_loss': contrastive_loss.item(),
+            'layer_corr': layer_corr,
+            'contrastive_loss': 0.0,
             'consistency_loss': consistency_loss,
         }
         return masked_grads, info
@@ -342,29 +356,36 @@ class DGMMFramework:
         return self.layer_importance.copy()
 
 
+# ═══════════════════════════════════════════════════════════════
+# 测试
+# ═══════════════════════════════════════════════════════════════
+
 def test_dgmm():
     """测试 DGMM 框架"""
-    print("Testing DGMM Framework...")
+    print("Testing DGMM Framework (Statistical Version)...")
 
     dgmm = DGMMFramework(
-        encoder_hidden_dim=128,
-        encoder_output_dim=64,
-        device="cuda" if torch.cuda.is_available() else "cpu"
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        warmup_steps=0  # 测试时不延迟
     )
 
     test_grads = {
-        'layer1.weight': torch.randn(512, 512).to(dgmm.device).to(dgmm.dtype),
-        'layer1.bias': torch.randn(512).to(dgmm.device).to(dgmm.dtype),
-        'layer2.weight': torch.randn(256, 512).to(dgmm.device).to(dgmm.dtype),
-        'layer2.bias': torch.randn(256).to(dgmm.device).to(dgmm.dtype),
+        'model.layers.0.self_attn.q_proj.weight': torch.randn(512, 512).to(dgmm.device).to(dgmm.dtype),
+        'model.layers.0.self_attn.k_proj.weight': torch.randn(512, 512).to(dgmm.device).to(dgmm.dtype),
+        'model.layers.8.mlp.down_proj.weight': torch.randn(256, 512).to(dgmm.device).to(dgmm.dtype),
+        'model.layers.16.self_attn.o_proj.weight': torch.randn(512, 512).to(dgmm.device).to(dgmm.dtype),
+        'model.layers.24.mlp.up_proj.weight': torch.randn(512, 256).to(dgmm.device).to(dgmm.dtype),
+        'lm_head.weight': torch.randn(32000, 512).to(dgmm.device).to(dgmm.dtype),
     }
 
     masked_grads, info = dgmm.apply_mask(test_grads)
+    importance = dgmm.get_layer_importance()
 
-    print(f"Original gradients: {len(test_grads)}")
-    print(f"Masked gradients: {len(masked_grads)}")
-    print(f"Layer importance: {dgmm.get_layer_importance()}")
+    print(f"Gradients: {len(test_grads)} → {len(masked_grads)}")
     print(f"Info: {info}")
+    print("Layer importance (per-block):")
+    for k, v in sorted(importance.items()):
+        print(f"  {k}: {v:.4f}")
     print("DGMM Framework test passed!")
 
 
