@@ -89,12 +89,13 @@ class DGMMFramework:
         contrastive_temperature: float = 0.5,
         contrastive_weight: float = 0.1,
         consistency_weight: float = 0.2,
-        ema_alpha: float = 0.9,
+        ema_alpha: float = 0.99,
         device: str = "cuda",
         dtype: torch.dtype = torch.bfloat16,
         grad_history_window: int = 5,
         warmup_steps: int = 500,
         mask_floor: float = 0.3,
+        meta_lr: float = 1e-5,
     ):
         self.device = device
         self.dtype = dtype
@@ -107,6 +108,7 @@ class DGMMFramework:
         self.grad_history_window = grad_history_window
         self.warmup_steps = warmup_steps
         self.mask_floor = mask_floor
+        self.meta_lr = meta_lr
 
         self.gradient_encoder = GradientEncoder(
             input_dim=encoder_hidden_dim,
@@ -132,7 +134,7 @@ class DGMMFramework:
             list(self.contrastive_learner.parameters()) +
             list(self.layer_attention.parameters()) +
             list(self.feature_fusion.parameters()),
-            lr=1e-4,
+            lr=meta_lr,
             weight_decay=1e-5
         )
 
@@ -200,15 +202,15 @@ class DGMMFramework:
     # ── 核心流程 ──────────────────────────────────────────────
 
     def _compute_layer_gradients(self, accumulated_grads: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """将梯度按 transformer 层号分组（如 layer_0, layer_1, ..., embed, norm, head）"""
+        """将梯度按 transformer 层块分组（每 8 层一组，分成 4 个 block）"""
         layer_grads = {}
         for name, grad in accumulated_grads.items():
-            # 提取 transformer 层号: model.layers.5.xxx → layer_5
             match = re.search(r'layers\.(\d+)', name)
             if match:
-                layer_name = f"layer_{match.group(1)}"
+                layer_idx = int(match.group(1))
+                block_idx = layer_idx // 8  # 32层 → 4个 block
+                layer_name = f"block_{block_idx}"
             else:
-                # embed_tokens、norm、lm_head 等顶层模块
                 layer_name = name.split('.')[1] if '.' in name else name.split('.')[0]
             if layer_name not in layer_grads:
                 layer_grads[layer_name] = []
