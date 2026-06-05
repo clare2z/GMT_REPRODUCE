@@ -235,11 +235,12 @@ class DGMMFramework:
                 stability.detach(), grad_diff.detach(), momentum.detach()
             ])
 
-            # 截断/填充到固定维度
+            # 分块平均到固定维度，保留全量梯度信号
             if grad.size(0) < self.encoder_hidden_dim:
                 grad = F.pad(grad, (0, self.encoder_hidden_dim - grad.size(0)))
-            elif grad.size(0) > self.encoder_hidden_dim:
-                grad = grad[:self.encoder_hidden_dim]
+            else:
+                chunk_size = grad.size(0) // self.encoder_hidden_dim
+                grad = grad[:chunk_size * self.encoder_hidden_dim].view(self.encoder_hidden_dim, -1).mean(dim=1)
 
             # 编码 + 融合
             base_features = self.gradient_encoder(grad.unsqueeze(0).to(self.dtype))
