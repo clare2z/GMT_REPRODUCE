@@ -6,6 +6,7 @@ DGMM (Dynamic Gradient Manifold Masking) 核心框架
 """
 
 import os
+import re
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -199,10 +200,16 @@ class DGMMFramework:
     # ── 核心流程 ──────────────────────────────────────────────
 
     def _compute_layer_gradients(self, accumulated_grads: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """将梯度按层组织"""
+        """将梯度按 transformer 层号分组（如 layer_0, layer_1, ..., embed, norm, head）"""
         layer_grads = {}
         for name, grad in accumulated_grads.items():
-            layer_name = name.split('.')[0]
+            # 提取 transformer 层号: model.layers.5.xxx → layer_5
+            match = re.search(r'layers\.(\d+)', name)
+            if match:
+                layer_name = f"layer_{match.group(1)}"
+            else:
+                # embed_tokens、norm、lm_head 等顶层模块
+                layer_name = name.split('.')[1] if '.' in name else name.split('.')[0]
             if layer_name not in layer_grads:
                 layer_grads[layer_name] = []
             layer_grads[layer_name].append(grad.to(self.device).flatten())
