@@ -396,6 +396,7 @@ def create_trainer(algorithm, model, args, device):
         kwargs["dgmm_config"] = {
             "warmup_steps": args.dgmm_warmup,
             "mask_floor": args.dgmm_mask_floor,
+            "encoder_hidden_dim": args.dgmm_encoder_dim,
         }
 
     return trainer_cls(**kwargs)
@@ -428,6 +429,8 @@ def main():
                         help="DGMM: warmup 步数 (默认 500)")
     parser.add_argument("--dgmm_mask_floor", type=float, default=0.2,
                         help="DGMM: 梯度掩码最低比例 (默认 0.2)")
+    parser.add_argument("--dgmm_encoder_dim", type=int, default=256,
+                        help="DGMM: 梯度编码器隐藏维度 (默认 256)")
     parser.add_argument("--accumulation_steps", type=int, default=4)
     parser.add_argument("--subset", type=int, default=None,
                         help="只用前 N 条数据（快速验证用，默认全量 110K）")
