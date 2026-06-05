@@ -236,50 +236,46 @@ class DGMMFramework:
         """
         创新点二：层自适应参数更新
 
-        对每层独立分析 6 个统计维度，用逻辑公式计算重要性分数。
-        不需要神经网络——统计量的数学含义直接映射到重要性权重。
-
-        公式：
-            raw = +2.0 * pos  -1.5 * neg  -0.5 * std  -1.0 * diff  +1.0 * mom  +1.0 * corr
-            importance = sigmoid(raw)  →  (0, 1)
+        对每层独立分析 6 个统计维度 → 跨层 z-score 归一化 → 逻辑公式算重要性。
+        归一化确保比较的是层间"相对差异"而非绝对值（避免 sigmoid 饱和）。
         """
         layer_names = sorted(layer_grads.keys())
-        scores = {}
+        n = max(1, len(layer_names))
 
-        # 先构建简易特征向量用于层间相关性计算
-        feat_list = []
+        # ── 收集每层的 6 个统计量 ─────────────────────────────
+        raw_stats = {}  # layer_name → [pos, neg, zero, std, diff, mom]
         for layer_name in layer_names:
             grad = layer_grads[layer_name]
             pos, neg, zero = self._analyze_gradient_direction(grad)
             std, diff, mom = self._analyze_gradient_stability(layer_name, grad)
-            # 6 维统计量组合为特征向量 (64 维以兼容 correlation)
-            full_feat = torch.cat([
-                torch.stack([pos, neg, zero, std, diff, mom]).to(self.dtype),
-                torch.zeros(self.encoder_output_dim - 6, device=self.device, dtype=self.dtype)
+            raw_stats[layer_name] = torch.stack([
+                pos, neg, zero, std, diff, torch.tensor(min(mom.item(), 3.0), device=self.device)
             ])
-            feat_list.append(full_feat.unsqueeze(0))
 
-        layer_features = torch.cat(feat_list, dim=0)
-        layer_corr = self._analyze_layer_correlation(layer_features)
+        # ── 跨层 z-score 归一化（比较层间相对差异）─────────────
+        # 让每维统计量在层间均值为 0、标准差为 1
+        stats_tensor = torch.stack([raw_stats[name] for name in layer_names])  # (n, 6)
+        stats_mean = stats_tensor.mean(dim=0)
+        stats_std = stats_tensor.std(dim=0) + 1e-8
+        stats_norm = (stats_tensor - stats_mean) / stats_std  # (n, 6)
 
-        # 逐层计算重要性
-        for i, layer_name in enumerate(layer_names):
-            grad = layer_grads[layer_name]
-            pos, neg, zero = self._analyze_gradient_direction(grad)
-            std, diff, mom = self._analyze_gradient_stability(layer_name, grad)
+        # ── 层间相关性（用归一化后的前6维做特征）─────────────────
+        padded = F.pad(stats_norm, (0, self.encoder_output_dim - 6))  # (n, 64)
+        layer_corr = self._analyze_layer_correlation(padded)
 
-            # ── 6 维度统计公式 ──────────────────────────────
-            raw_score = (
-                + 2.0 * pos.item()                        # 正梯度多 → 主动学习
-                - 1.5 * neg.item()                        # 负梯度多 → 反向挣扎
-                - 0.5 * std.item()                        # 波动大 → 不稳定
-                - 1.0 * diff.item()                       # 变化幅度大 → 噪声
-                + 1.0 * min(mom.item(), 3.0)              # 动量↑(≤3) → 加速收敛
-                + 1.0 * layer_corr.item()                 # 层间协同 → 重要
-            )
+        # ── 逻辑公式：归一化统计量 → importance ─────────────────
+        # 系数含义：+ = 提升重要性, - = 降低重要性
+        weights = torch.tensor([2.0, -1.5, -0.5, -1.0, 1.0, 1.0], device=self.device)
+        # pos  zzzzzzzz  neg  zzzz  zero  zzzz
+        # std  zzzzzzzz  diff  zzzzz  mom
+        raw_scores = (stats_norm * weights).sum(dim=1)  # (n,)
+        raw_scores += layer_corr  # 全局协同加分
 
-            importance = float(torch.sigmoid(torch.tensor(raw_score)))
-            scores[layer_name] = importance
+        importance = torch.sigmoid(raw_scores)  # (n,) → (0,1)
+
+        scores = {}
+        for i, name in enumerate(layer_names):
+            scores[name] = float(importance[i].item())
 
         return scores, layer_corr.item()
 
