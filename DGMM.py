@@ -92,6 +92,8 @@ class DGMMFramework:
         device: str = "cuda",
         dtype: torch.dtype = torch.bfloat16,
         grad_history_window: int = 5,
+        warmup_steps: int = 500,
+        mask_floor: float = 0.3,
     ):
         self.device = device
         self.dtype = dtype
@@ -102,6 +104,8 @@ class DGMMFramework:
         self.consistency_weight = consistency_weight
         self.ema_alpha = ema_alpha
         self.grad_history_window = grad_history_window
+        self.warmup_steps = warmup_steps
+        self.mask_floor = mask_floor
 
         self.gradient_encoder = GradientEncoder(
             input_dim=encoder_hidden_dim,
@@ -292,25 +296,27 @@ class DGMMFramework:
         )
 
         self.meta_optimizer.zero_grad()
-        total_meta_loss.backward()
-        self.meta_optimizer.step()
+        # warmup 期间冻结元网络，不学噪声
+        if self.step_count > self.warmup_steps:
+            total_meta_loss.backward()
+            self.meta_optimizer.step()
 
         # ── 掩码应用 + warmup ──────────────────────────────────
         masked_grads = {}
-        warmup_steps = 500
         self.step_count += 1
 
         for name, grad in accumulated_grads.items():
             layer_name = name.split('.')[0]
             importance = self.layer_importance.get(layer_name, self.global_importance_threshold)
 
-            weight = max(0.1, min(1.0, importance))
+            weight = max(self.mask_floor, min(1.0, importance))
 
             # warmup: 前 warmup_steps 步不干扰，之后渐进引入
-            if self.step_count <= warmup_steps:
+            if self.step_count <= self.warmup_steps:
                 weight = 1.0
             else:
-                ramp = min(1.0, (self.step_count - warmup_steps) / 500.0)
+                # ramp 长度 = warmup_steps，比例自适应
+                ramp = min(1.0, (self.step_count - self.warmup_steps) / max(1, self.warmup_steps))
                 weight = 1.0 - ramp * (1.0 - weight)
 
             masked_grads[name] = grad * weight

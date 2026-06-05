@@ -393,7 +393,10 @@ def create_trainer(algorithm, model, args, device):
         kwargs[param] = getattr(args, param)
 
     if algorithm == "DGMM":
-        kwargs["dgmm_config"] = {}
+        kwargs["dgmm_config"] = {
+            "warmup_steps": args.dgmm_warmup,
+            "mask_floor": args.dgmm_mask_floor,
+        }
 
     return trainer_cls(**kwargs)
 
@@ -419,7 +422,12 @@ def main():
     parser.add_argument("--drop_rate", type=float, default=0.1)
     parser.add_argument("--top_k", type=int, default=50)
     parser.add_argument("--momentum", type=float, default=0.9)
-    parser.add_argument("--k_percent", type=int, default=50)
+    parser.add_argument("--k_percent", type=int, default=80,
+                        help="GMT: 保留 top-k% 梯度 (论文默认 50，小数据建议 80)")
+    parser.add_argument("--dgmm_warmup", type=int, default=100,
+                        help="DGMM: warmup 步数 (默认 100)")
+    parser.add_argument("--dgmm_mask_floor", type=float, default=0.5,
+                        help="DGMM: 梯度掩码最低比例 (默认 0.5)")
     parser.add_argument("--accumulation_steps", type=int, default=4)
     parser.add_argument("--subset", type=int, default=None,
                         help="只用前 N 条数据（快速验证用，默认全量 110K）")
