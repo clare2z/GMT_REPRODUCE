@@ -296,10 +296,8 @@ class DGMMFramework:
         )
 
         self.meta_optimizer.zero_grad()
-        # warmup 期间冻结元网络，不学噪声
-        if self.step_count > self.warmup_steps:
-            total_meta_loss.backward()
-            self.meta_optimizer.step()
+        total_meta_loss.backward()
+        self.meta_optimizer.step()
 
         # ── 掩码应用 + warmup ──────────────────────────────────
         masked_grads = {}
