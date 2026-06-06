@@ -270,13 +270,14 @@ class DGMMFramework:
         raw_scores = (stats_norm * weights).sum(dim=1)  # (n,)
         raw_scores += layer_corr  # 全局协同加分
 
-        # 温度缩放：拉开层间差距，让 sigmoid 输出更分散
-        temperature = 3.0
-        importance = torch.sigmoid(raw_scores * temperature)  # (n,) → (0,1)
+        # DGMM 核心差异：可放大亦可压低，不同于 GMT 只能切割
+        # tanh 将 raw_score 映射到 (-1, +1)，×0.8 → 缩放范围 0.2~1.8
+        scale = 1.0 + torch.tanh(raw_scores * 0.5) * 0.8  # (n,), 范围 ~0.2-1.8
+        scale = torch.clamp(scale, 0.2, 2.0)  # 安全边界
 
         scores = {}
         for i, name in enumerate(layer_names):
-            scores[name] = float(importance[i].item())
+            scores[name] = float(scale[i].item())
 
         return scores, layer_corr.item()
 
@@ -328,16 +329,17 @@ class DGMMFramework:
             else:
                 layer_name = name.split('.')[1] if '.' in name else name.split('.')[0]
 
-            importance = self.layer_importance.get(layer_name, self.global_importance_threshold)
-            weight = max(self.mask_floor, min(1.0, importance))
+            scale = self.layer_importance.get(layer_name, self.global_importance_threshold)
+            # scale ∈ [0.2, 2.0]: >1.0 = 提升, <1.0 = 压低 (GMT 做不到提升)
 
-            # warmup: 前 warmup_steps 步不干扰，之后渐进引入
+            # warmup + ramp
             if self.step_count <= self.warmup_steps:
                 weight = 1.0
             else:
                 ramp = min(1.0, (self.step_count - self.warmup_steps) / max(1, self.warmup_steps))
-                weight = 1.0 - ramp * (1.0 - weight)
+                weight = 1.0 + ramp * (scale - 1.0)  # scale > 1 → boost
 
+            weight = max(0.1, min(2.0, weight))  # 安全边界
             masked_grads[name] = grad * weight
 
         info = {
