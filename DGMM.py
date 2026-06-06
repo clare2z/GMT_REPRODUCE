@@ -122,7 +122,7 @@ class DGMMFramework:
         # 层重要性追踪
         self.layer_importance: Dict[str, float] = {}
         self.prev_layer_importance: Dict[str, float] = {}
-        self.global_importance_threshold = 0.5
+        self.global_importance_threshold = 0.8  # k_percent 基准
 
         # 梯度历史（稳定性分析用）
         self.grad_history: Dict[str, list] = {}
@@ -235,8 +235,12 @@ class DGMMFramework:
         """
         创新点二：层自适应参数更新
 
-        对每层独立分析 6 个统计维度 → 跨层 z-score 归一化 → 逻辑公式算重要性。
-        归一化确保比较的是层间"相对差异"而非绝对值（避免 sigmoid 饱和）。
+        6 统计量 → 每层动态 k_percent → 每层独立阈值掩码。
+
+        关键层（活跃、稳定、高协同）→ k_percent 高 → 保留更多参数更新
+        低价值层（挣扎、波动、低协同）→ k_percent 低 → 砍掉更多冗余更新
+
+        k_percent 范围：50%-95%（动态调整，GMT 用固定 80%）
         """
         layer_names = sorted(layer_grads.keys())
         n = max(1, len(layer_names))
@@ -251,33 +255,27 @@ class DGMMFramework:
                 pos, neg, zero, std, diff, torch.tensor(min(mom.item(), 3.0), device=self.device)
             ])
 
-        # ── 跨层 z-score 归一化（比较层间相对差异）─────────────
-        # 让每维统计量在层间均值为 0、标准差为 1
+        # ── 跨层 z-score 归一化 ────────────────────────────────
         stats_tensor = torch.stack([raw_stats[name] for name in layer_names])  # (n, 6)
         stats_mean = stats_tensor.mean(dim=0)
         stats_std = stats_tensor.std(dim=0) + 1e-8
-        stats_norm = (stats_tensor - stats_mean) / stats_std  # (n, 6)
+        stats_norm = (stats_tensor - stats_mean) / stats_std
 
-        # ── 层间相关性（用归一化后的前6维做特征）─────────────────
-        padded = F.pad(stats_norm, (0, self.encoder_output_dim - 6))  # (n, 64)
+        # ── 层间相关性 ─────────────────────────────────────────
+        padded = F.pad(stats_norm, (0, self.encoder_output_dim - 6))
         layer_corr = self._analyze_layer_correlation(padded)
 
-        # ── 逻辑公式：归一化统计量 → importance ─────────────────
-        # 系数含义：+ = 提升重要性, - = 降低重要性
-        weights = torch.tensor([2.0, -1.5, -0.5, -1.0, 1.0, 1.0], device=self.device)
-        # pos  zzzzzzzz  neg  zzzz  zero  zzzz
-        # std  zzzzzzzz  diff  zzzzz  mom
-        raw_scores = (stats_norm * weights).sum(dim=1)  # (n,)
-        raw_scores += layer_corr  # 全局协同加分
-
-        # DGMM 核心差异：可放大亦可压低，不同于 GMT 只能切割
-        # tanh 将 raw_score 映射到 (-1, +1)，×0.8 → 缩放范围 0.2~1.8
-        scale = 1.0 + torch.tanh(raw_scores * 0.5) * 0.8  # (n,), 范围 ~0.2-1.8
-        scale = torch.clamp(scale, 0.2, 2.0)  # 安全边界
+        # ── 6 统计量 → 动态 k_percent ───────────────────────────
+        # base_k = 80 (和 GMT 一样的起点)
+        # 活跃 + → k↑, 挣扎 + → k↓, 波动 + → k↓, 变化 + → k↓, 动量 + → k↑, 协同 + → k↑
+        weights = torch.tensor([10.0, -10.0, -5.0, -5.0, 5.0, 5.0], device=self.device)
+        k_delta = (stats_norm * weights).sum(dim=1) + layer_corr * 5.0  # 每层偏离 base 的量
+        k_percent = 80.0 + k_delta  # base=80%，范围自适应
+        k_percent = torch.clamp(k_percent, 50.0, 95.0) / 100.0  # → [0.5, 0.95]
 
         scores = {}
         for i, name in enumerate(layer_names):
-            scores[name] = float(scale[i].item())
+            scores[name] = float(k_percent[i].item())
 
         return scores, layer_corr.item()
 
@@ -319,6 +317,14 @@ class DGMMFramework:
             self.prev_layer_importance[layer_name] = imp
 
         # ── 掩码应用 + warmup ──────────────────────────────────
+        # 每层用各自的 k_percent 算阈值（重要层阈值低→保留多）
+        block_thresholds = {}
+        for layer_name, kp in importance_scores.items():
+            if layer_name in layer_grads:
+                grad = layer_grads[layer_name]
+                k_idx = max(1, int(grad.numel() * (1.0 - kp)))  # 砍掉 bottom (1-kp)
+                block_thresholds[layer_name] = float(torch.kthvalue(grad.abs(), k_idx).values.item())
+
         masked_grads = {}
         self.step_count += 1
 
@@ -329,18 +335,16 @@ class DGMMFramework:
             else:
                 layer_name = name.split('.')[1] if '.' in name else name.split('.')[0]
 
-            scale = self.layer_importance.get(layer_name, self.global_importance_threshold)
-            # scale ∈ [0.2, 2.0]: >1.0 = 提升, <1.0 = 压低 (GMT 做不到提升)
+            threshold = block_thresholds.get(layer_name, 0.0)
+            mask = grad.abs() >= threshold
+            masked_grad = grad * mask.float().to(grad.dtype)
 
-            # warmup + ramp
+            # warmup + ramp：warmup 期间不掩码，之后渐进引入
             if self.step_count <= self.warmup_steps:
-                weight = 1.0
+                masked_grads[name] = grad
             else:
                 ramp = min(1.0, (self.step_count - self.warmup_steps) / max(1, self.warmup_steps))
-                weight = 1.0 + ramp * (scale - 1.0)  # scale > 1 → boost
-
-            weight = max(0.1, min(2.0, weight))  # 安全边界
-            masked_grads[name] = grad * weight
+                masked_grads[name] = grad * (1.0 - ramp) + masked_grad * ramp
 
         info = {
             'avg_importance': avg_importance,
