@@ -271,7 +271,9 @@ class DGMMFramework:
         raw_scores = (stats_norm * weights).sum(dim=1)  # (n,)
         raw_scores += layer_corr  # 全局协同加分
 
-        importance = torch.sigmoid(raw_scores)  # (n,) → (0,1)
+        # 温度缩放：拉开层间差距，让 sigmoid 输出更分散
+        temperature = 3.0
+        importance = torch.sigmoid(raw_scores * temperature)  # (n,) → (0,1)
 
         scores = {}
         for i, name in enumerate(layer_names):
