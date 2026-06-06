@@ -215,8 +215,7 @@ class DGMMFramework:
         for name, grad in accumulated_grads.items():
             match = re.search(r'layers\.(\d+)', name)
             if match:
-                block_idx = int(match.group(1)) // 8
-                layer_name = f"block_{block_idx}"
+                layer_name = f"layer_{match.group(1)}"
             else:
                 layer_name = name.split('.')[1] if '.' in name else name.split('.')[0]
             if layer_name not in layer_grads:
@@ -325,7 +324,7 @@ class DGMMFramework:
         for name, grad in accumulated_grads.items():
             match = re.search(r'layers\.(\d+)', name)
             if match:
-                layer_name = f"block_{int(match.group(1)) // 8}"
+                layer_name = f"layer_{match.group(1)}"
             else:
                 layer_name = name.split('.')[1] if '.' in name else name.split('.')[0]
 
