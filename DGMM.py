@@ -266,12 +266,11 @@ class DGMMFramework:
         layer_corr = self._analyze_layer_correlation(padded)
 
         # ── 6 统计量 → 动态 k_percent ───────────────────────────
-        # base_k = 80 (和 GMT 一样的起点)
-        # 活跃 + → k↑, 挣扎 + → k↓, 波动 + → k↓, 变化 + → k↓, 动量 + → k↑, 协同 + → k↑
-        weights = torch.tensor([10.0, -10.0, -5.0, -5.0, 5.0, 5.0], device=self.device)
-        k_delta = (stats_norm * weights).sum(dim=1) + layer_corr * 5.0  # 每层偏离 base 的量
-        k_percent = 80.0 + k_delta  # base=80%，范围自适应
-        k_percent = torch.clamp(k_percent, 50.0, 95.0) / 100.0  # → [0.5, 0.95]
+        # 权重放大 5 倍 + 宽范围 clamp，确保层间有真实差异
+        weights = torch.tensor([50.0, -50.0, -25.0, -25.0, 25.0, 25.0], device=self.device)
+        k_delta = (stats_norm * weights).sum(dim=1) + layer_corr * 25.0
+        k_percent = 80.0 + k_delta
+        k_percent = torch.clamp(k_percent, 30.0, 95.0) / 100.0  # → [0.3, 0.95]
 
         scores = {}
         for i, name in enumerate(layer_names):
