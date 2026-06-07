@@ -235,46 +235,39 @@ class DGMMFramework:
         """
         创新点二：层自适应参数更新
 
-        6 统计量 → 每层动态 k_percent → 每层独立阈值掩码。
-
-        关键层（活跃、稳定、高协同）→ k_percent 高 → 保留更多参数更新
-        低价值层（挣扎、波动、低协同）→ k_percent 低 → 砍掉更多冗余更新
-
-        k_percent 范围：50%-95%（动态调整，GMT 用固定 80%）
+        每层 6 个统计量对照绝对标准打分（非跨层比较）。
+        活跃 + 稳定 + 高协同 → k高，挣扎 + 波动 + 孤立 → k低。
         """
         layer_names = sorted(layer_grads.keys())
         n = max(1, len(layer_names))
 
         # ── 收集每层的 6 个统计量 ─────────────────────────────
-        raw_stats = {}  # layer_name → [pos, neg, zero, std, diff, mom]
         for layer_name in layer_names:
             grad = layer_grads[layer_name]
             pos, neg, zero = self._analyze_gradient_direction(grad)
             std, diff, mom = self._analyze_gradient_stability(layer_name, grad)
-            raw_stats[layer_name] = torch.stack([
-                pos, neg, zero, std, diff, torch.tensor(min(mom.item(), 3.0), device=self.device)
-            ])
 
-        # ── 跨层 z-score 归一化 ────────────────────────────────
-        stats_tensor = torch.stack([raw_stats[name] for name in layer_names])  # (n, 6)
-        stats_mean = stats_tensor.mean(dim=0)
-        stats_std = stats_tensor.std(dim=0) + 1e-8
-        stats_norm = (stats_tensor - stats_mean) / stats_std
+            # ── 绝对标准打分（不跨层比较）──────────────────────
+            # pos > 0.3 = 层在向前学习, neg > 0.4 = 层在反向挣扎
+            # std < 0.5 = 稳定, diff < 0.2 = 变化小, mom > 0.8 = 动量持续
+            score = 0.0
+            score += 1.0 if pos.item() > 0.3 else (-1.0 if pos.item() < 0.15 else 0.0)
+            score -= 1.0 if neg.item() > 0.4 else (0.0 if neg.item() < 0.2 else -0.5)
+            score -= 0.5 if std.item() > 0.5 else (0.0 if std.item() < 0.1 else -0.25)
+            score -= 0.5 if diff.item() > 0.2 else (0.0 if diff.item() < 0.05 else -0.25)
+            score += 0.5 if mom.item() > 0.8 else (0.0 if mom.item() < 1.2 else -0.25)
 
-        # ── 层间相关性 ─────────────────────────────────────────
-        padded = F.pad(stats_norm, (0, self.encoder_output_dim - 6))
+            # ── score → k_percent ──────────────────────────────
+            k = 80.0 + score * 15.0  # 每 ±1 分偏移 15%
+            k = max(40.0, min(95.0, k)) / 100.0
+            scores[layer_name] = k
+
+        # ── 层间相关性（创新一第3点）─────────────────────────────
+        # 用每层 k 值的分布做特征，算层间皮尔逊相关
+        k_vals = torch.tensor([scores[n] for n in layer_names], device=self.device).unsqueeze(1)
+        k_feats = torch.cat([k_vals] * 6, dim=1)  # (n, 6)
+        padded = F.pad(k_feats, (0, self.encoder_output_dim - 6))
         layer_corr = self._analyze_layer_correlation(padded)
-
-        # ── 6 统计量 → 动态 k_percent ───────────────────────────
-        # 权重放大 5 倍 + 宽范围 clamp，确保层间有真实差异
-        weights = torch.tensor([50.0, -50.0, -25.0, -25.0, 25.0, 25.0], device=self.device)
-        k_delta = (stats_norm * weights).sum(dim=1) + layer_corr * 25.0
-        k_percent = 80.0 + k_delta
-        k_percent = torch.clamp(k_percent, 30.0, 95.0) / 100.0  # → [0.3, 0.95]
-
-        scores = {}
-        for i, name in enumerate(layer_names):
-            scores[name] = float(k_percent[i].item())
 
         return scores, layer_corr.item()
 
