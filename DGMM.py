@@ -99,8 +99,7 @@ class DGMMFramework:
         pos, neg, zero = self._analyze_gradient_direction(global_grad)
         std, diff, mom = self._analyze_gradient_stability("global", global_grad)
 
-        # ── 质量分数 → 全局 scale ──────────────────────────
-        # pos↑ = 在学习, neg↑ = 挣扎, std↑ = 噪声, diff↑ = 波动, mom~1 = 加速
+        # ── 质量分数 → 相对历史变化 → scale ────────────────
         quality = (
             +3.0 * pos.item()
             -2.0 * neg.item()
@@ -108,11 +107,13 @@ class DGMMFramework:
             -2.0 * min(diff.item(), 0.5)
             +1.5 * min(mom.item(), 3.0) if mom.item() > 0 else -0.5
         )
-        scale = 1.0 + np.tanh(quality) * 0.5  # 范围 [0.5, 1.5]
-
-        # EMA 平滑
-        self.global_scale = self.ema_alpha * self.global_scale + (1 - self.ema_alpha) * scale
-        final_scale = self.global_scale
+        # 质量变化趋势（相对历史平均）：变好 → 升，变差 → 降
+        if not hasattr(self, 'quality_ma'):
+            self.quality_ma = quality
+        self.quality_ma = 0.95 * self.quality_ma + 0.05 * quality
+        trend = (quality - self.quality_ma) * 10.0  # 放大 10 倍
+        scale = 1.0 + np.tanh(trend) * 0.6  # 范围 [0.4, 1.6]
+        final_scale = scale  # 不 EMA，直接响应变化
 
         # ── warmup ─────────────────────────────────────────
         self.step_count += 1
