@@ -78,21 +78,13 @@ class LayerAttentionFusion(nn.Module):
 
 class DGMMFramework:
     """
-    DGMM 核心框架 (简化版)
+    DGMM 核心框架 — 全局梯度质量分析 + 动态缩放
 
-    两个创新点全部保留：
-    1. 动态梯度建模：方向(正/负/零) + 稳定性(标准差/波动/动量) + 层间协同(皮尔逊相关系数)
-    2. 层自适应更新：每层独立评分，关键层保留更多梯度，低价值层抑制
+    两个创新点：
+    1. 动态梯度建模：方向(正/负/零) + 稳定性(标准差/波动/动量) 分析全部梯度
+    2. 自适应缩放：gradient 质量高 → scale > 1.0 提升，质量低 → scale < 1.0 压低
 
-    重要性评分公式 (6维度 → 1分数):
-        score = +2.0 * pos_ratio      ← 正梯度多 = 主动学习 → 重要
-                -1.5 * neg_ratio      ← 负梯度多 = 反向挣扎 → 降低
-                -0.5 * stability      ← 波动大 = 不稳定 → 降低
-                -1.0 * grad_diff      ← 变化大 = 噪声 → 降低
-                +1.0 * momentum_f     ← 动量↑ = 加速收敛 → 重要
-                +1.0 * 层相关性       ← 其他层协同 → 重要
-
-    皮尔逊相关系数: 层间 z-score 归一化后做点积 → 协方差矩阵 → 全局均值
+    与 GMT 区别：GMT 固定 k_percent 只砍不升，DGMM 连续缩放可升可降
     """
 
     def __init__(
@@ -242,6 +234,7 @@ class DGMMFramework:
         n = max(1, len(layer_names))
 
         # ── 收集每层的 6 个统计量 ─────────────────────────────
+        scores = {}
         for layer_name in layer_names:
             grad = layer_grads[layer_name]
             pos, neg, zero = self._analyze_gradient_direction(grad)
