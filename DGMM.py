@@ -99,7 +99,7 @@ class DGMMFramework:
         pos, neg, zero = self._analyze_gradient_direction(global_grad)
         std, diff, mom = self._analyze_gradient_stability("global", global_grad)
 
-        # ── 质量分数 → 相对历史变化 → scale ────────────────
+        # ── 6 统计量 → 动态 k_percent ───────────────────────
         quality = (
             +3.0 * pos.item()
             -2.0 * neg.item()
@@ -107,26 +107,27 @@ class DGMMFramework:
             -2.0 * min(diff.item(), 0.5)
             +1.5 * min(mom.item(), 3.0) if mom.item() > 0 else -0.5
         )
-        # 质量变化趋势（相对历史平均）：变好 → 升，变差 → 降
-        if not hasattr(self, 'quality_ma'):
-            self.quality_ma = quality
-        self.quality_ma = 0.95 * self.quality_ma + 0.05 * quality
-        trend = (quality - self.quality_ma) * 10.0  # 放大 10 倍
-        scale = 1.0 + np.tanh(trend) * 0.6  # 范围 [0.4, 1.6]
-        final_scale = scale  # 不 EMA，直接响应变化
+        # k_percent: 质量好→激进砍，质量差→保守留。GMT 固定 80%
+        k = 80.0 + quality * 15.0
+        k = max(0.55, min(0.95, k / 100.0))  # k ∈ [55%, 95%]
+
+        # 全局阈值掩码（如 GMT，但 k 动态）
+        all_abs = global_grad.abs()
+        k_idx = max(1, int(all_abs.numel() * (1.0 - k)))
+        threshold = float(torch.kthvalue(all_abs, k_idx).values.item())
 
         # ── warmup ─────────────────────────────────────────
         self.step_count += 1
-        if self.step_count <= self.warmup_steps:
-            weight = 1.0
-        else:
-            ramp = min(1.0, (self.step_count - self.warmup_steps) / max(1, self.warmup_steps))
-            weight = 1.0 + ramp * (final_scale - 1.0)
+        masked_grads = {}
+        for name, grad in accumulated_grads.items():
+            mask = grad.abs() >= threshold
+            masked_grad = grad * mask.float().to(grad.dtype)
 
-        weight = max(self.mask_floor, min(2.0, weight))
-
-        # ── 应用 ───────────────────────────────────────────
-        masked_grads = {name: grad * weight for name, grad in accumulated_grads.items()}
+            if self.step_count <= self.warmup_steps:
+                masked_grads[name] = grad
+            else:
+                ramp = min(1.0, (self.step_count - self.warmup_steps) / max(1, self.warmup_steps))
+                masked_grads[name] = grad * (1.0 - ramp) + masked_grad * ramp
 
         info = {
             'avg_importance': weight,
