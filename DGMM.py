@@ -211,8 +211,12 @@ class DGMMFramework:
             lo, hi = 0.95, 0.99
         elif self.step_count < 1000:
             lo, hi = 0.90, 0.98
-        else:
+        elif self.step_count < 3000:
             lo, hi = 0.85, 0.98
+        elif self.step_count < 4000:
+            lo, hi = 0.80, 0.98
+        else:
+            lo, hi = 0.75, 0.98
         for name in names:
             self.layer_keep[name] = max(lo, min(hi, self.layer_keep[name]))
 
