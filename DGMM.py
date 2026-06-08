@@ -89,7 +89,7 @@ class DGMMFramework:
         groups = {}
         for name, grad in grads.items():
             m = re.search(r'layers\.(\d+)', name)
-            key = f"L{m.group(1):02d}" if m else name.split('.')[-1]
+            key = f"L{int(m.group(1)):02d}" if m else name.split('.')[-1]
             groups.setdefault(key, []).append(grad.to(self.device).flatten())
         return {k: torch.cat(v) for k, v in groups.items()}
 
@@ -153,7 +153,7 @@ class DGMMFramework:
         masked_grads = {}
         for name, grad in accumulated_grads.items():
             m = re.search(r'layers\.(\d+)', name)
-            key = f"L{m.group(1):02d}" if m else name.split('.')[-1]
+            key = f"L{int(m.group(1)):02d}" if m else name.split('.')[-1]
             thr = thresholds.get(key)
             if thr is not None:
                 mask = grad.abs() >= thr
