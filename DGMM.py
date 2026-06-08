@@ -132,7 +132,7 @@ class DGMMFramework:
                 masked_grads[name] = grad * (1.0 - ramp) + masked_grad * ramp
 
         info = {
-            'avg_importance': k,
+            'avg_importance': boost,
             'layer_corr': 0.0,
             'contrastive_loss': 0.0,
             'consistency_loss': 0.0,
