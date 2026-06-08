@@ -158,6 +158,31 @@ class DGMMFramework:
             groups.setdefault(key, []).append(g)
         return {k: torch.cat(v) for k, v in groups.items()}
 
+    def _redistribute_budget(self, names, layer_nums, hi):
+        """预算保留重分配: 保持全局均值 0.91，扩大层间差异，保护首尾层"""
+        transformer_names = [n for n in names if layer_nums.get(n, -1) >= 0]
+        if len(transformer_names) < 2:
+            return
+        sorted_tf = sorted(transformer_names, key=lambda n: layer_nums[n])
+        first2 = sorted_tf[:2]
+        last4 = sorted_tf[-4:]
+        middle = [n for n in transformer_names if n not in first2 and n not in last4]
+
+        cur_mean = np.mean([self.layer_keep[n] for n in transformer_names])
+        target_mean = 0.91
+        if cur_mean > 0:
+            scale = target_mean / cur_mean
+            for n in transformer_names:
+                self.layer_keep[n] *= scale
+
+        # 结构保护: first2≥0.90, last4≥0.92, middle≥0.84
+        for n in first2:
+            self.layer_keep[n] = max(0.90, min(hi, self.layer_keep[n]))
+        for n in last4:
+            self.layer_keep[n] = max(0.92, min(hi, self.layer_keep[n]))
+        for n in middle:
+            self.layer_keep[n] = max(0.84, min(hi, self.layer_keep[n]))
+
     # ═══ 核心 ═══════════════════════════════════════════
 
     def apply_mask(self, accumulated_grads: Dict[str, torch.Tensor]) -> Tuple[Dict[str, torch.Tensor], Dict]:
@@ -212,8 +237,7 @@ class DGMMFramework:
             m = re.match(r'L(\d+)', name)
             layer_nums[name] = int(m.group(1)) if m else -1
 
-        # ── 预算保留重分配 ────────────────────────────
-        # 先阶段 clamp 保底
+        # ── 阶段 clamp ───────────────────────────────
         if self.step_count < 500:
             lo, hi = 0.95, 0.99
         elif self.step_count < 1000:
@@ -223,30 +247,9 @@ class DGMMFramework:
         for name in names:
             self.layer_keep[name] = max(lo, min(hi, self.layer_keep[name]))
 
-        # 预算重分配: 保持均值 ~0.91，扩大层间差异
-        transformer_names = [n for n in names if layer_nums.get(n, -1) >= 0]
-        if len(transformer_names) >= 2:
-            sorted_tf = sorted(transformer_names, key=lambda n: layer_nums[n])
-            first2 = sorted_tf[:2]
-            last4 = sorted_tf[-4:]
-            middle = [n for n in transformer_names if n not in first2 and n not in last4]
-
-            # 当前均值
-            cur_mean = np.mean([self.layer_keep[n] for n in transformer_names])
-            target_mean = 0.91
-            # 缩放使均值回到 target_mean
-            if cur_mean > 0:
-                scale = target_mean / cur_mean
-                for n in transformer_names:
-                    self.layer_keep[n] *= scale
-
-            # 安全 floor: first2≥0.90, last4≥0.92, middle≥0.84
-            for n in first2:
-                self.layer_keep[n] = max(0.90, min(hi, self.layer_keep[n]))
-            for n in last4:
-                self.layer_keep[n] = max(0.92, min(hi, self.layer_keep[n]))
-            for n in middle:
-                self.layer_keep[n] = max(0.84, min(hi, self.layer_keep[n]))
+        # ── 预算重分配 (step>=1000 后启用) ──────────
+        if self.step_count >= 1000:
+            self._redistribute_budget(names, layer_nums, hi)
 
         # ── 应用: parameter-level threshold ──────────
         self.step_count += 1
