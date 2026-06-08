@@ -1,26 +1,33 @@
 """
 DGMM — 每层自适应梯度保留 (Per-Layer Adaptive Gradient Retention)
 
-核心理念:
-  GMT: 全局固定保留 80% → 二元 mask，所有层一样
-  DGMM: 每层独立保留比例 (70%-90%) → 关键层多留，冗余层多砍
+创新 1: 动态梯度建模
+  1. 方向一致性(cosine similarity with EMA gradient)
+  2. 稳定性(grad.abs().mean() 历史波动)
+  3. 层间协同(per-layer synergy score)
 
-创新 1: 梯度方向/稳定性/层间相关 → 决定每层留多少
-创新 2: 关键层留更多(↓砍)、低价值层砍更多(↓留)，每层独立
+创新 2: 层自适应参数更新
+  4. 关键层保留更多 ← keep_pct 自适应
+  5. 低价值层减少冗余 ← keep_pct 自适应
+  6. 非统一 mask ← 每层独立 keep_pct + parameter-level threshold
 
-为什么 AdamW 下有效: 梯度设为零不受 AdamW 抵消 (零永远是零)
+特殊处理: embed/lm_head/norm/bias/1D 参数原样通过
+
+AdamW 兼容: 只做设零(梯度为零不受 AdamW 抵消)
 """
 
 import os, re
 import torch, torch.nn as nn, torch.nn.functional as F
 import numpy as np
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Set
 
 
 class GradientEncoder(nn.Module):
     def __init__(self, input_dim=128, hidden_dim=128, output_dim=64):
         super().__init__()
-        self.fc1, self.fc2, self.fc3 = nn.Linear(input_dim, hidden_dim), nn.Linear(hidden_dim, hidden_dim), nn.Linear(hidden_dim, output_dim)
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, output_dim)
     def forward(self, x):
         return F.normalize(self.fc3(F.relu(self.fc2(F.relu(self.fc1(x))))), dim=-1)
 
@@ -47,129 +54,204 @@ class DGMMFramework:
         self.ema_alpha = ema_alpha
         self.warmup_steps = warmup_steps
         self.encoder_output_dim = encoder_output_dim
-        self.grad_history: Dict[str, list] = {}
         self.step_count = 0
-        self.layer_keep: Dict[str, float] = {}
+
+        # 历史追踪
+        self.grad_ema: Dict[str, torch.Tensor] = {}      # per-layer: EMA of gradient values
+        self.absmean_history: Dict[str, list] = {}       # per-layer: grad.abs().mean() history
+        self.stats_ema: Dict[str, torch.Tensor] = {}     # per-layer: 6-dim stats EMA (for synergy)
+        self.layer_keep: Dict[str, float] = {}           # per-layer: EMA keep_pct
+
+        # 不需处理的参数名模式
+        self._skip_patterns = ['embed', 'lm_head', 'norm', 'bias']
+
+    def _should_skip(self, name: str) -> bool:
+        """跳过 embed/lm_head/norm/bias/1D 参数"""
+        # 1D parameters
+        if name.endswith('weight') and 'weight' in name:
+            pass  # need to check dim later
+        for p in self._skip_patterns:
+            if p in name:
+                return True
+        return False
+
+    def _is_1d_or_bias(self, name: str, grad: torch.Tensor) -> bool:
+        return grad.ndim <= 1 or 'bias' in name
 
     # ═══ 创新一: 三个分析维度 ═══════════════════════════
 
-    def _direction(self, grad):
-        """梯度方向: 正=向前学, 负=反向调, 零=收敛"""
-        return (grad > 0).float().mean(), (grad < 0).float().mean(), (grad == 0).float().mean()
+    def _direction_consistency(self, name: str, grad: torch.Tensor) -> torch.Tensor:
+        """1. 方向一致性: 当前梯度与历史 EMA 梯度的 cosine similarity"""
+        g_flat = grad.flatten().to(self.dtype)
+        # 截断到统一长度
+        max_len = 50000
+        if g_flat.size(0) > max_len:
+            idx = torch.randperm(g_flat.size(0), device=self.device)[:max_len]
+            g_flat = g_flat[idx]
 
-    def _stability(self, name, grad):
-        """稳定性: 标准差(频率) + 波动幅度 + 动量(趋势)"""
-        if name not in self.grad_history:
-            self.grad_history[name] = []
-        std, diff, mom = 0.0, 0.0, 0.0
-        norm = float(grad.norm().item())
-        h = self.grad_history[name]
-        if h:
-            std = float(np.std(h))
-            if len(h) >= 2:
-                diff = float(abs(h[-1] - h[-2]))
-                if len(h) >= 3:
-                    mom = float(diff / (abs(h[-2] - h[-3]) + 1e-8))
-        h.append(norm)
-        if len(h) > 5: h.pop(0)
-        return (torch.tensor(std, device=self.device),
-                torch.tensor(diff, device=self.device),
-                torch.tensor(mom, device=self.device))
+        if name not in self.grad_ema:
+            self.grad_ema[name] = g_flat.detach().clone()
+            return torch.tensor(1.0, device=self.device)  # 第一步 = 完全一致
 
-    def _correlation(self, features):
-        """层间协同: z-score → 皮尔逊矩阵 → 全局均值"""
-        n = features.size(0)
-        if n < 2: return torch.tensor(0.0, device=self.device)
-        z = (features - features.mean(0, keepdim=True)) / (features.std(0, keepdim=True) + 1e-8)
-        return torch.mm(z, z.t()).mean() / max(1, features.size(1))
+        ema = self.grad_ema[name]
+        # cosine similarity
+        cos = torch.dot(g_flat, ema) / (g_flat.norm() * ema.norm() + 1e-8)
+        # update EMA
+        self.grad_ema[name] = self.ema_alpha * ema + (1 - self.ema_alpha) * g_flat.detach()
+        return cos.clamp(-1.0, 1.0)
+
+    def _stability(self, name: str, grad: torch.Tensor) -> torch.Tensor:
+        """2. 稳定性: grad.abs().mean() 的历史波动"""
+        if name not in self.absmean_history:
+            self.absmean_history[name] = []
+
+        abs_mean = float(grad.abs().mean().item())
+        h = self.absmean_history[name]
+        h.append(abs_mean)
+        if len(h) > 20:
+            h.pop(0)
+
+        if len(h) < 2:
+            return torch.tensor(0.0, device=self.device)  # 没历史 = 完全稳定
+
+        # 变异系数: std / mean (归一化波动)
+        mean_val = np.mean(h)
+        std_val = np.std(h)
+        cv = std_val / (mean_val + 1e-8)
+        # 映射到 [0, 1]: 0=完全稳定, 1=极度波动
+        return torch.tensor(min(float(cv), 1.0), device=self.device)
+
+    def _layer_synergy(self, name: str, all_stats: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """3. 层间协同: 该层与所有其他层的平均相关性"""
+        if len(all_stats) < 2:
+            return torch.tensor(0.0, device=self.device)
+
+        this_feat = all_stats[name]
+        synergies = []
+        for other_name, other_feat in all_stats.items():
+            if other_name == name:
+                continue
+            # Pearson correlation between this layer's stats and other layer's stats
+            corr = torch.dot(this_feat, other_feat) / (this_feat.norm() * other_feat.norm() + 1e-8)
+            synergies.append(corr.item())
+        return torch.tensor(np.mean(synergies), device=self.device)
 
     # ═══ 层分组 ═════════════════════════════════════════
 
-    def _group_layers(self, grads):
+    def _group_layers(self, grads: Dict[str, torch.Tensor], skip_names: Set[str]) -> Dict[str, torch.Tensor]:
+        """把梯度的 transfer 层分组合并（跳过特殊参数）"""
         groups = {}
         for name, grad in grads.items():
+            if name in skip_names:
+                continue
             m = re.search(r'layers\.(\d+)', name)
-            key = f"L{int(m.group(1)):02d}" if m else name.split('.')[-1]
+            key = f"L{int(m.group(1)):02d}" if m else name.rsplit('.', 1)[0]
             groups.setdefault(key, []).append(grad.to(self.device).flatten())
         return {k: torch.cat(v) for k, v in groups.items()}
 
     # ═══ 核心 ═══════════════════════════════════════════
 
-    def apply_mask(self, accumulated_grads):
+    def apply_mask(self, accumulated_grads: Dict[str, torch.Tensor]) -> Tuple[Dict[str, torch.Tensor], Dict]:
         if os.environ.get("DGMM_DISABLED") == "1":
             return accumulated_grads, {'avg_importance': 1.0, 'layer_corr': 0.0,
                                         'contrastive_loss': 0.0, 'consistency_loss': 0.0}
 
-        layer_grads = self._group_layers(accumulated_grads)
+        # ── 分类参数 ────────────────────────────────
+        skip_names = set()
+        for name, grad in accumulated_grads.items():
+            if self._should_skip(name) or self._is_1d_or_bias(name, grad):
+                skip_names.add(name)
+
+        layer_grads = self._group_layers(accumulated_grads, skip_names)
         names = sorted(layer_grads.keys())
         n = len(names)
-        if n < 2:
-            # 只有一层, 按 GMT 处理
-            threshold = float(torch.kthvalue(
-                list(layer_grads.values())[0].abs(),
-                max(1, int(list(layer_grads.values())[0].numel() * 0.2))
-            ).values.item())
-            return {name: grad * (grad.abs() >= threshold).float().to(grad.dtype)
-                    for name, grad in accumulated_grads.items()}, \
-                   {'avg_importance': 0.8, 'layer_corr': 0.0, 'contrastive_loss': 0.0, 'consistency_loss': 0.0}
 
-        # ── 每层 6 维统计 ──────────────────────────
-        stats_list = []
+        # 只有一层时退化为 GMT
+        if n < 2:
+            return self._fallback_gmt(accumulated_grads, list(layer_grads.values())[0])
+
+        # ── 每层 3 维信号 ──────────────────────────
+        all_stats = {}  # name → 3-dim feature (cosine, stability, synergy_placeholder)
+        raw_features = {}
         for name in names:
             g = layer_grads[name]
-            pos, neg, zero = self._direction(g)
-            std, diff, mom = self._stability(name, g)
-            stats_list.append(torch.stack([
-                pos, neg, zero, std, diff,
-                torch.tensor(min(mom.item(), 3.0), device=self.device)
-            ]))
-        stats = torch.stack(stats_list)
+            cos = self._direction_consistency(name, g)        # [0, 1]
+            stab = self._stability(name, g)                    # [0, 1], lower=better
+            raw_features[name] = torch.stack([cos, stab])
 
-        # ── 跨层 z-score + 层间相关 ─────────────────
-        stats_norm = (stats - stats.mean(0, keepdim=True)) / (stats.std(0, keepdim=True) + 1e-8)
-        corr = self._correlation(stats_norm)
-
-        # ── 创新二: 每层独立 keep_pct ───────────────
-        # 活跃+稳定+高协同 → 多留; 挣扎+波动+孤立 → 多砍
-        w = torch.tensor([4.0, -3.0, -1.0, -2.0, 1.5, 1.5], device=self.device)
-        quality = (stats_norm * w).sum(dim=1) + corr * 2.0
-        keep_pct = 0.80 + quality * 0.08  # 基准 80% ± 调整
-        keep_pct = torch.clamp(keep_pct, 0.65, 0.92)  # [65%, 92%]
-
-        # EMA 追踪
-        for i, name in enumerate(names):
-            kv = float(keep_pct[i].item())
-            self.layer_keep[name] = self.ema_alpha * self.layer_keep.get(name, kv) + (1 - self.ema_alpha) * kv
-
-        # ── 每层阈值 + 掩码 ────────────────────────
-        thresholds = {}
+        # synergy: 用 (cos, stability) 作为特征向量算层间相关性
         for name in names:
-            g_abs = layer_grads[name].abs()
-            kp = self.layer_keep[name]
-            cut = max(1, int(g_abs.numel() * (1.0 - kp)))
-            thresholds[name] = float(torch.kthvalue(g_abs, cut).values.item())
+            syn = self._layer_synergy(name, raw_features)      # [-1, 1]
+            all_stats[name] = torch.stack([
+                raw_features[name][0],  # cosine: 高=方向一致
+                raw_features[name][1],  # stability: 低=稳定
+                syn,                    # synergy: 高=协同
+            ])
+            # EMA 平滑 stats（用于跨步稳定）
+            if name in self.stats_ema:
+                self.stats_ema[name] = self.ema_alpha * self.stats_ema[name] + (1 - self.ema_alpha) * all_stats[name]
+            else:
+                self.stats_ema[name] = all_stats[name]
 
+        # ── 每层 quality → keep_pct [0.80, 0.98] ────
+        # cos↑ keep↑  stab↑(不稳定) keep↓  syn↑ keep↑
+        for i, name in enumerate(names):
+            s = self.stats_ema[name]
+            quality = float((+2.0 * s[0] - 1.5 * s[1] + 1.5 * s[2]).item())
+            keep = 0.89 + quality * 0.06  # 中心 ~0.89
+            keep = max(0.80, min(0.98, keep))
+            self.layer_keep[name] = self.ema_alpha * self.layer_keep.get(name, keep) + (1 - self.ema_alpha) * keep
+
+        # ── 应用: parameter-level threshold ──────────
         self.step_count += 1
         masked_grads = {}
-        for name, grad in accumulated_grads.items():
-            m = re.search(r'layers\.(\d+)', name)
-            key = f"L{int(m.group(1)):02d}" if m else name.split('.')[-1]
-            thr = thresholds.get(key)
-            if thr is not None:
-                mask = grad.abs() >= thr
-                masked_grad = grad * mask.float().to(grad.dtype)
-                if self.step_count <= self.warmup_steps:
-                    masked_grads[name] = grad
-                else:
-                    ramp = min(1.0, (self.step_count - self.warmup_steps) / max(1, self.warmup_steps))
-                    masked_grads[name] = grad * (1.0 - ramp) + masked_grad * ramp
-            else:
-                masked_grads[name] = grad
+        all_keep = []
 
-        info = {'avg_importance': float(keep_pct.mean().item()),
-                'layer_corr': float(corr.item()),
+        for name, grad in accumulated_grads.items():
+            if name in skip_names:
+                masked_grads[name] = grad  # 原样通过
+                all_keep.append(1.0)
+                continue
+
+            m = re.search(r'layers\.(\d+)', name)
+            key = f"L{int(m.group(1)):02d}" if m else name.rsplit('.', 1)[0]
+            kp = self.layer_keep.get(key, 0.89)
+
+            # parameter-level: 对当前参数的梯度独立算阈值
+            g_abs = grad.abs()
+            cut_idx = max(1, int(g_abs.numel() * (1.0 - kp)))
+            thr = float(torch.kthvalue(g_abs.flatten(), cut_idx).values.item())
+
+            mask = g_abs >= thr
+            masked_grad = grad * mask.float().to(grad.dtype)
+
+            if self.step_count <= self.warmup_steps:
+                masked_grads[name] = grad
+            else:
+                ramp = min(1.0, (self.step_count - self.warmup_steps) / max(1, self.warmup_steps))
+                masked_grads[name] = grad * (1.0 - ramp) + masked_grad * ramp
+
+            all_keep.append(kp)
+
+        avg_k = float(np.mean(all_keep))
+        avg_syn = float(np.mean([self.layer_keep.get(n, 0.89) for n in names]))
+        info = {'avg_importance': avg_syn,
+                'layer_corr': avg_syn,
                 'contrastive_loss': 0.0, 'consistency_loss': 0.0}
         return masked_grads, info
+
+    def _fallback_gmt(self, grads, layer_grad):
+        """单层退化为 GMT"""
+        g_abs = layer_grad.abs()
+        thr = float(torch.kthvalue(g_abs, max(1, int(g_abs.numel() * 0.2))).values.item())
+        masked = {}
+        for name, grad in grads.items():
+            if self._should_skip(name) or self._is_1d_or_bias(name, grad):
+                masked[name] = grad
+            else:
+                masked[name] = grad * (grad.abs() >= thr).float().to(grad.dtype)
+        return masked, {'avg_importance': 0.8, 'layer_corr': 0.0,
+                        'contrastive_loss': 0.0, 'consistency_loss': 0.0}
 
     def get_layer_importance(self):
         return self.layer_keep.copy()
