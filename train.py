@@ -404,6 +404,7 @@ def create_trainer(algorithm, model, args, device):
             "warmup_steps": args.dgmm_warmup,
             "mask_floor": args.dgmm_mask_floor,
             "encoder_hidden_dim": args.dgmm_encoder_dim,
+            "ablate": args.dgmm_ablate,
         }
 
     return trainer_cls(**kwargs)
@@ -431,11 +432,13 @@ def main():
     parser.add_argument("--top_k", type=int, default=50)
     parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument("--k_percent", type=int, default=80,
-                        help="GMT: 保留 top-k% 梯度 (论文默认 50，小数据建议 80)")
+                        help="GMT: 保留 top-k% 梯度 (等价 keep_pct, 92→keep 92%)")
     parser.add_argument("--dgmm_warmup", type=int, default=500,
                         help="DGMM: warmup 步数 (默认 500)")
     parser.add_argument("--dgmm_mask_floor", type=float, default=0.2,
                         help="DGMM: 梯度掩码最低比例 (默认 0.2)")
+    parser.add_argument("--dgmm_ablate", type=str, default="",
+                        help="消融: direction,volatility,synergy (逗号分隔)")
     parser.add_argument("--dgmm_encoder_dim", type=int, default=256,
                         help="DGMM: 梯度编码器隐藏维度 (默认 256)")
     parser.add_argument("--accumulation_steps", type=int, default=4)

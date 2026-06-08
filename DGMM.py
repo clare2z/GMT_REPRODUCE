@@ -59,11 +59,13 @@ class DGMMFramework:
                  consistency_weight=0.2, ema_alpha=0.99,
                  device="cuda", dtype=torch.bfloat16,
                  grad_history_window=5, warmup_steps=500,
-                 mask_floor=0.2, meta_lr=1e-5):
+                 mask_floor=0.2, meta_lr=1e-5,
+                 ablate: str = ""):
         self.ema_alpha = ema_alpha
         self.warmup_steps = warmup_steps
         self.encoder_output_dim = encoder_output_dim
         self.step_count = 0
+        self.ablate = set(ablate.split(",")) if ablate else set()
 
         # 历史追踪
         self.grad_ema: Dict[str, torch.Tensor] = {}
@@ -198,7 +200,10 @@ class DGMMFramework:
         # ── quality → keep_pct ───────────────────────
         for name in names:
             s = self.stats_ema[name]
-            quality = float((+2.0 * s[0].item() + 1.5 * s[1].item() + 1.5 * s[2].item()))
+            d = 0.5 if "direction" in self.ablate else s[0].item()
+            v = 0.5 if "volatility" in self.ablate else s[1].item()
+            y = 0.0 if "synergy" in self.ablate else s[2].item()
+            quality = float((+2.0 * d + 1.5 * v + 1.5 * y))
             keep = 0.89 + quality * 0.06
             keep = max(0.0, min(1.0, keep))
             if name in self.layer_keep:
