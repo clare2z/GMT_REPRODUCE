@@ -99,7 +99,7 @@ class DGMMFramework:
         pos, neg, zero = self._analyze_gradient_direction(global_grad)
         std, diff, mom = self._analyze_gradient_stability("global", global_grad)
 
-        # ── 6 统计量 → 动态 k_percent ───────────────────────
+        # ── 6 统计量 → 梯度质量 → boost ──────────────────
         quality = (
             +3.0 * pos.item()
             -2.0 * neg.item()
@@ -107,16 +107,15 @@ class DGMMFramework:
             -2.0 * min(diff.item(), 0.5)
             +1.5 * min(mom.item(), 3.0) if mom.item() > 0 else -0.5
         )
-        # 长周期 EMA 平滑（~200 步响应），防单步噪声污染 k
         if not hasattr(self, 'quality_ema'):
             self.quality_ema = quality
         self.quality_ema = 0.99 * self.quality_ema + 0.01 * quality
-        k = 80.0 + self.quality_ema * 5.0  # 缩小质量权重，减少振幅
-        k = max(0.65, min(0.90, k / 100.0))  # k ∈ [65%, 90%]
+        # boost: 质量好 → 放大幸存梯度，质量差 → 保留原值
+        boost = 1.0 + max(0.0, self.quality_ema) * 0.5  # [1.0, 1.75]
 
-        # 全局阈值掩码（如 GMT，但 k 动态）
+        # GMT 式全局阈值 + DGMM boost = 砍 + 升
         all_abs = global_grad.abs()
-        k_idx = max(1, int(all_abs.numel() * (1.0 - k)))
+        k_idx = max(1, int(all_abs.numel() * 0.2))  # 固定砍 20%
         threshold = float(torch.kthvalue(all_abs, k_idx).values.item())
 
         # ── warmup ─────────────────────────────────────────
@@ -124,7 +123,7 @@ class DGMMFramework:
         masked_grads = {}
         for name, grad in accumulated_grads.items():
             mask = grad.abs() >= threshold
-            masked_grad = grad * mask.float().to(grad.dtype)
+            masked_grad = grad * mask.float().to(grad.dtype) * boost
 
             if self.step_count <= self.warmup_steps:
                 masked_grads[name] = grad
