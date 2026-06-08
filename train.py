@@ -29,6 +29,7 @@ import argparse
 from datetime import datetime
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from datasets import load_dataset
+from peft import LoraConfig, get_peft_model, TaskType
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
@@ -432,6 +433,12 @@ def main():
     parser.add_argument("--dgmm_encoder_dim", type=int, default=256,
                         help="DGMM: 梯度编码器隐藏维度 (默认 256)")
     parser.add_argument("--accumulation_steps", type=int, default=4)
+    parser.add_argument("--lora", action="store_true", default=False,
+                        help="使用 LoRA 全精度微调（梯度信号更干净）")
+    parser.add_argument("--lora_r", type=int, default=16,
+                        help="LoRA rank (默认 16)")
+    parser.add_argument("--lora_alpha", type=int, default=32,
+                        help="LoRA alpha (默认 32)")
     parser.add_argument("--subset", type=int, default=None,
                         help="只用前 N 条数据（快速验证用，默认全量 110K）")
     args = parser.parse_args()
@@ -447,9 +454,24 @@ def main():
 
     # 1. 加载模型
     logger.info(">>> [1/4] Loading model...")
-    model, tokenizer = load_model(args.model_name, device, use_quantization=args.quantize)
+    # LoRA 下不用 4-bit，需要全精度梯度
+    use_quant = args.quantize and not args.lora
+    model, tokenizer = load_model(args.model_name, device, use_quantization=use_quant)
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
+
+    if args.lora:
+        logger.info(f">>> LoRA: r={args.lora_r}, alpha={args.lora_alpha}")
+        lora_config = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+            lora_dropout=0.0,
+            bias="none",
+            task_type=TaskType.CAUSAL_LM,
+        )
+        model = get_peft_model(model, lora_config)
+        model.print_trainable_parameters()
 
     # 2. 加载数据
     logger.info(">>> [2/4] Loading dataset...")
