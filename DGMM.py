@@ -81,8 +81,9 @@ class DGMMFramework:
         """跳过 embed / lm_head / norm / bias / 1D 参数"""
         if grad.ndim <= 1:
             return True
+        name_lower = name.lower()
         for kw in self._skip_kw:
-            if kw in name:
+            if kw in name_lower:
                 return True
         return False
 
@@ -101,7 +102,7 @@ class DGMMFramework:
                 idx = torch.arange(g.size(0), device=g.device)
             self.sample_indices[name] = idx
 
-        idx = self.sample_indices[name]
+        idx = self.sample_indices[name].to(g.device)
         g_sampled = g[idx]
 
         if name not in self.grad_ema:
@@ -225,7 +226,6 @@ class DGMMFramework:
         masked_grads = {}
         target_keeps = []
         mask_keeps = []
-        layer_log = []
 
         for name, grad in accumulated_grads.items():
             if name in skip_names:
@@ -255,13 +255,13 @@ class DGMMFramework:
                 mask_keeps.append(mask_actual * ramp + (1 - ramp))
                 target_keeps.append(kp)
 
-            layer_log.append((key, kp, mask_actual))
 
         # ── 日志 ─────────────────────────────────────
-        sorted_layers = sorted(layer_log, key=lambda x: x[1])
+        # 从 self.layer_keep 去重获取每层 keep（layer-level 非 parameter-level）
+        sorted_layers = sorted(self.layer_keep.items(), key=lambda x: x[1])
         n_show = min(3, len(sorted_layers))
-        lowest = sorted_layers[:n_show]
-        highest = sorted_layers[-n_show:]
+        lowest = [(l[0], f"{l[1]:.3f}") for l in sorted_layers[:n_show]]
+        highest = [(l[0], f"{l[1]:.3f}") for l in sorted_layers[-n_show:]]
         avg_synergy = float(np.mean([self.stats_ema[n][2].item() for n in names]))
 
         info = {
@@ -270,15 +270,18 @@ class DGMMFramework:
             'contrastive_loss': 0.0,
             'consistency_loss': 0.0,
             'mask_keep_mean': float(np.mean(mask_keeps)),
-            'effective_keep_mean': float(np.mean(target_keeps)),
+            'effective_keep_mean': float(np.mean(mask_keeps)),
+            'target_keep_mean': float(np.mean(target_keeps)),
             'target_keep_min': float(min(target_keeps)),
             'target_keep_max': float(max(target_keeps)),
-            'lowest_layers': str([(l[0], f"{l[1]:.3f}") for l in lowest]),
-            'highest_layers': str([(l[0], f"{l[1]:.3f}") for l in highest]),
+            'lowest_layers': str(lowest),
+            'highest_layers': str(highest),
         }
         return masked_grads, info
 
     def _fallback_gmt(self, grads, skip_names, layer_grads):
+        if not layer_grads:
+            return grads, self._empty_info()
         g_abs = list(layer_grads.values())[0].abs()
         thr = float(torch.kthvalue(g_abs, max(1, int(g_abs.numel() * 0.2))).values.item())
         masked = {}
@@ -292,7 +295,7 @@ class DGMMFramework:
     def _empty_info(self):
         return {'avg_importance': 1.0, 'layer_corr': 0.0, 'contrastive_loss': 0.0,
                 'consistency_loss': 0.0, 'mask_keep_mean': 1.0, 'effective_keep_mean': 1.0,
-                'target_keep_min': 1.0, 'target_keep_max': 1.0,
+                'target_keep_mean': 1.0, 'target_keep_min': 1.0, 'target_keep_max': 1.0,
                 'lowest_layers': '[]', 'highest_layers': '[]'}
 
     def get_layer_importance(self):
