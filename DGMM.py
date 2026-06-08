@@ -193,51 +193,82 @@ class DGMMFramework:
             else:
                 self.stats_ema[name] = all_stats[name]
 
-        # ── 每层 quality → keep_pct [0.80, 0.98] ────
+        # ── 每层 quality → keep_pct ─────────────────
         # cos↑ keep↑  stab↑(不稳定) keep↓  syn↑ keep↑
+        keep_raw = {}
         for i, name in enumerate(names):
             s = self.stats_ema[name]
             quality = float((+2.0 * s[0] - 1.5 * s[1] + 1.5 * s[2]).item())
-            keep = 0.89 + quality * 0.06  # 中心 ~0.89
-            keep = max(0.80, min(0.98, keep))
+            keep = 0.89 + quality * 0.06
+            keep_raw[name] = keep
             self.layer_keep[name] = self.ema_alpha * self.layer_keep.get(name, keep) + (1 - self.ema_alpha) * keep
+
+        # ── 稳定性保护：分阶段 clamp ──────────────────
+        if self.step_count < 500:
+            lo, hi = 0.95, 0.99
+        elif self.step_count < 1000:
+            lo, hi = 0.90, 0.98
+        else:
+            lo, hi = 0.85, 0.98
+        for name in names:
+            self.layer_keep[name] = max(lo, min(hi, self.layer_keep[name]))
 
         # ── 应用: parameter-level threshold ──────────
         self.step_count += 1
         masked_grads = {}
-        all_keep = []
+        all_target = []
+        all_actual = []
+        all_layer_keeps = []
 
         for name, grad in accumulated_grads.items():
             if name in skip_names:
-                masked_grads[name] = grad  # 原样通过
-                all_keep.append(1.0)
+                masked_grads[name] = grad
+                all_target.append(1.0)
+                all_actual.append(1.0)
                 continue
 
             m = re.search(r'layers\.(\d+)', name)
             key = f"L{int(m.group(1)):02d}" if m else name.rsplit('.', 1)[0]
             kp = self.layer_keep.get(key, 0.89)
 
-            # parameter-level: 对当前参数的梯度独立算阈值
+            # parameter-level threshold
             g_abs = grad.abs()
             cut_idx = max(1, int(g_abs.numel() * (1.0 - kp)))
             thr = float(torch.kthvalue(g_abs.flatten(), cut_idx).values.item())
-
             mask = g_abs >= thr
+            actual_keep = float(mask.float().mean().item())
             masked_grad = grad * mask.float().to(grad.dtype)
 
             if self.step_count <= self.warmup_steps:
                 masked_grads[name] = grad
+                all_target.append(kp)
+                all_actual.append(1.0)  # warmup期间全保留
             else:
                 ramp = min(1.0, (self.step_count - self.warmup_steps) / max(1, self.warmup_steps))
                 masked_grads[name] = grad * (1.0 - ramp) + masked_grad * ramp
+                all_target.append(kp)
+                all_actual.append(kp * ramp + (1 - ramp))  # ramp混合后的真实保留率
 
-            all_keep.append(kp)
+            all_layer_keeps.append((key, kp, actual_keep))
 
-        avg_k = float(np.mean(all_keep))
-        avg_syn = float(np.mean([self.layer_keep.get(n, 0.89) for n in names]))
-        info = {'avg_importance': avg_syn,
-                'layer_corr': avg_syn,
-                'contrastive_loss': 0.0, 'consistency_loss': 0.0}
+        # ── 详细日志 ─────────────────────────────────
+        sorted_layers = sorted(all_layer_keeps, key=lambda x: x[1])
+        n_show = min(3, len(sorted_layers))
+        lowest = sorted_layers[:n_show]
+        highest = sorted_layers[-n_show:]
+
+        info = {
+            'avg_importance': float(np.mean(all_target)),
+            'layer_corr': float(np.mean(all_actual)),
+            'contrastive_loss': float(np.mean(all_actual)),
+            'consistency_loss': 0.0,
+            # 新增字段（供日志查看）
+            'actual_keep_mean': float(np.mean(all_actual)),
+            'target_keep_min': float(min(all_target)),
+            'target_keep_max': float(max(all_target)),
+            'lowest_layers': str([(l[0], f"{l[1]:.3f}") for l in lowest]),
+            'highest_layers': str([(l[0], f"{l[1]:.3f}") for l in highest]),
+        }
         return masked_grads, info
 
     def _fallback_gmt(self, grads, layer_grad):
