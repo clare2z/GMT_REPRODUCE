@@ -11,7 +11,7 @@ DGMM — Per-Layer Adaptive Gradient Retention
   5. 低价值层减少冗余 — keep_pct 自适应
   6. 非统一 mask — 每层独立 keep_pct + parameter-level threshold
 
-dgmm_aggressive_late_075 — step<500→[0.95,0.99], 500-999→[0.90,0.98], 1000-2999→[0.85,0.98], 3000-3999→[0.80,0.98], 4000+→[0.75,0.98]。若4000+ loss>3.0或keep<0.85则回滚到[0.80,0.98]。
+dgmm_safe_46 — step<500→[0.95,0.99], 500-999→[0.90,0.98], 1000+→[0.85,0.98]。Ablation: 后期降低下限(0.80/0.75)损害泛化(46%→41%)。若4000+ loss>3.0或keep<0.85则回滚到[0.80,0.98]。
 """
 
 import os, re
@@ -195,31 +195,58 @@ class DGMMFramework:
             else:
                 self.stats_ema[name] = feat
 
-        # ── quality → keep_pct ───────────────────────
+        # ── quality → raw keep → budget redistribution ──
+        raw_keep = {}
+        layer_nums = {}  # name → layer index (for first2/last4 detection)
         for name in names:
             s = self.stats_ema[name]
             quality = float((+2.0 * s[0].item() + 1.5 * s[1].item() + 1.5 * s[2].item()))
             keep = 0.89 + quality * 0.06
-            keep = max(0.0, min(1.0, keep))  # 先 clamp 到 [0,1]
-
+            keep = max(0.0, min(1.0, keep))
             if name in self.layer_keep:
                 self.layer_keep[name] = self.ema_alpha * self.layer_keep[name] + (1 - self.ema_alpha) * keep
             else:
                 self.layer_keep[name] = keep
+            raw_keep[name] = self.layer_keep[name]
+            # 提取层号
+            m = re.match(r'L(\d+)', name)
+            layer_nums[name] = int(m.group(1)) if m else -1
 
-        # ── 阶段 clamp ───────────────────────────────
+        # ── 预算保留重分配 ────────────────────────────
+        # 先阶段 clamp 保底
         if self.step_count < 500:
             lo, hi = 0.95, 0.99
         elif self.step_count < 1000:
             lo, hi = 0.90, 0.98
-        elif self.step_count < 3000:
-            lo, hi = 0.85, 0.98
-        elif self.step_count < 4000:
-            lo, hi = 0.80, 0.98
         else:
-            lo, hi = 0.75, 0.98
+            lo, hi = 0.85, 0.98
         for name in names:
             self.layer_keep[name] = max(lo, min(hi, self.layer_keep[name]))
+
+        # 预算重分配: 保持均值 ~0.91，扩大层间差异
+        transformer_names = [n for n in names if layer_nums.get(n, -1) >= 0]
+        if len(transformer_names) >= 2:
+            sorted_tf = sorted(transformer_names, key=lambda n: layer_nums[n])
+            first2 = sorted_tf[:2]
+            last4 = sorted_tf[-4:]
+            middle = [n for n in transformer_names if n not in first2 and n not in last4]
+
+            # 当前均值
+            cur_mean = np.mean([self.layer_keep[n] for n in transformer_names])
+            target_mean = 0.91
+            # 缩放使均值回到 target_mean
+            if cur_mean > 0:
+                scale = target_mean / cur_mean
+                for n in transformer_names:
+                    self.layer_keep[n] *= scale
+
+            # 安全 floor: first2≥0.90, last4≥0.92, middle≥0.84
+            for n in first2:
+                self.layer_keep[n] = max(0.90, min(hi, self.layer_keep[n]))
+            for n in last4:
+                self.layer_keep[n] = max(0.92, min(hi, self.layer_keep[n]))
+            for n in middle:
+                self.layer_keep[n] = max(0.84, min(hi, self.layer_keep[n]))
 
         # ── 应用: parameter-level threshold ──────────
         self.step_count += 1
