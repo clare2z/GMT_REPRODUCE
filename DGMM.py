@@ -11,7 +11,7 @@ DGMM — Per-Layer Adaptive Gradient Retention
   5. 低价值层减少冗余 — keep_pct 自适应
   6. 非统一 mask — 每层独立 keep_pct + parameter-level threshold
 
-dgmm_safe_46 — step<500→[0.95,0.99], 500-999→[0.90,0.98], 1000+→[0.85,0.98]。Ablation: 后期降低下限(0.80/0.75)损害泛化(46%→41%)。若4000+ loss>3.0或keep<0.85则回滚到[0.80,0.98]。
+dgmm_safe_redistribute_091 — step<500→[0.95,0.99], 500-999→[0.90,0.98], 1000+→[0.85,0.98] + budget redistribution(mean=0.91, first2≥0.90, last4≥0.92, middle≥0.84)。Ablation: aggressive late(0.80/0.75)损害泛化(46%→41%)。若4000+ loss>3.0或keep<0.85则回滚到[0.80,0.98]。
 """
 
 import os, re
