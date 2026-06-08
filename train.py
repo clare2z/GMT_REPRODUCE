@@ -351,7 +351,13 @@ class DGMMTrainer:
             if count % 10 == 0 or count == 1:
                 elapsed = time.time() - t_start
                 eta = (elapsed / count) * (total_batches - count)
-                imp_str = f" imp={dgmm_info['avg_importance']:.3f}" if dgmm_info else ""
+                imp_str = ""
+                if dgmm_info:
+                    imp_str = (f" imp={dgmm_info.get('avg_importance', 0):.3f}"
+                               f" mk={dgmm_info.get('mask_keep_mean', 0):.3f}"
+                               f" tgt=[{dgmm_info.get('target_keep_min', 0):.2f},{dgmm_info.get('target_keep_max', 0):.2f}]"
+                               f" lo={dgmm_info.get('lowest_layers', '?')}"
+                               f" hi={dgmm_info.get('highest_layers', '?')}")
                 self.best_loss = min(self.best_loss, outputs.loss.item())
                 status = "✅" if outputs.loss.item() <= self.best_loss else "  "
                 logger.info(f"  {status} {count}/{total_batches} | loss={outputs.loss.item():.4f} | eta={eta:.0f}s{imp_str}")
