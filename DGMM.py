@@ -110,7 +110,7 @@ class DGMMFramework:
         # 长周期 EMA 平滑（~200 步响应），防单步噪声污染 k
         if not hasattr(self, 'quality_ema'):
             self.quality_ema = quality
-        self.quality_ema = 0.995 * self.quality_ema + 0.005 * quality
+        self.quality_ema = 0.99 * self.quality_ema + 0.01 * quality
         k = 80.0 + self.quality_ema * 5.0  # 缩小质量权重，减少振幅
         k = max(0.65, min(0.90, k / 100.0))  # k ∈ [65%, 90%]
 
