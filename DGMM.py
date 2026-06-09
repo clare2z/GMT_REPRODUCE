@@ -11,7 +11,7 @@ DGMM — Per-Layer Adaptive Gradient Retention
   5. 低价值层减少冗余 — keep_pct 自适应
   6. 非统一 mask — 每层独立 keep_pct + parameter-level threshold
 
-dgmm_safe_46 — step<500→[0.95,0.99], 500-999→[0.90,0.98], 1000+→[0.85,0.98]。Ablation: aggressive late(0.75/0.80)→41%, budget redistribution→38%。
+DGMM-v1-effective (dgmm_final_46) — pos/neg/zero方向+grad.norm稳定度+全局层间相关。safe schedule: step<500→[0.95,0.99], 500-999→[0.90,0.98], 1000+→[0.85,0.98]。Ablation: DGMM-v2-cosine-synergy=32%, aggressive=41%, budget=38%。
 """
 
 import os, re
@@ -91,61 +91,31 @@ class DGMMFramework:
 
     # ═══ 创新一: 三个分析维度 ═══════════════════════════
 
-    def _direction_consistency(self, name: str, grad: torch.Tensor) -> float:
-        """1. 方向一致性: 固定位置采样的当前梯度与 EMA 梯度的 cosine similarity"""
-        g = grad.detach().float().flatten()
-        max_len = 50000
+    def _direction(self, grad: torch.Tensor):
+        """1. 方向分析: pos/neg/zero 梯度符号分布"""
+        return (grad > 0).float().mean(), (grad < 0).float().mean(), (grad == 0).float().mean()
 
-        # 固定采样索引，每步复用同一批位置
-        if name not in self.sample_indices:
-            if g.size(0) > max_len:
-                idx = torch.randperm(g.size(0), device=g.device)[:max_len]
-            else:
-                idx = torch.arange(g.size(0), device=g.device)
-            self.sample_indices[name] = idx
-
-        idx = self.sample_indices[name].to(g.device)
-        g_sampled = g[idx]
-
-        if name not in self.grad_ema:
-            self.grad_ema[name] = g_sampled.clone()
-            return 1.0
-
-        ema = self.grad_ema[name]
-        cos = torch.dot(g_sampled, ema) / (g_sampled.norm() * ema.norm() + 1e-8)
-        self.grad_ema[name] = self.ema_alpha * ema + (1 - self.ema_alpha) * g_sampled
-        return float(cos.clamp(-1.0, 1.0).item())
-
-    def _volatility(self, name: str, grad: torch.Tensor) -> float:
-        """2. 波动性: grad.abs().mean() 的历史变异系数 (0=稳定, 1=波动)"""
+    def _stability(self, name: str, grad: torch.Tensor) -> float:
+        """2. 稳定性: grad.norm() 历史波动 (0=稳定, 1=波动)"""
         if name not in self.absmean_history:
             self.absmean_history[name] = []
-
-        abs_mean = float(grad.detach().float().abs().mean().item())
+        norm_val = float(grad.detach().float().norm().item())
         h = self.absmean_history[name]
-        h.append(abs_mean)
+        h.append(norm_val)
         if len(h) > 20:
             h.pop(0)
         if len(h) < 2:
             return 0.0
+        cv = float(np.std(h) / (np.mean(h) + 1e-8))
+        return min(cv, 1.0)
 
-        mean_val = np.mean(h)
-        std_val = np.std(h)
-        cv = std_val / (mean_val + 1e-8)
-        return min(float(cv), 1.0)
-
-    def _layer_synergy(self, my_name: str, features: Dict[str, torch.Tensor]) -> float:
-        """3. 层间协同: 该层与所有其他层的平均皮尔逊相关"""
-        if len(features) < 2:
+    def _correlation(self, features: torch.Tensor) -> float:
+        """3. 全局层间相关: z-score → 皮尔逊矩阵 → 全局均值"""
+        n = features.size(0)
+        if n < 2:
             return 0.0
-        my_feat = features[my_name]
-        scores = []
-        for other_name, other_feat in features.items():
-            if other_name == my_name:
-                continue
-            r = torch.dot(my_feat, other_feat) / (my_feat.norm() * other_feat.norm() + 1e-8)
-            scores.append(float(r.item()))
-        return float(np.mean(scores))
+        z = (features - features.mean(0, keepdim=True)) / (features.std(0, keepdim=True) + 1e-8)
+        return float(torch.mm(z, z.t()).mean().item() / max(1, features.size(1)))
 
     # ═══ 层分组 ═════════════════════════════════════════
 
@@ -175,34 +145,24 @@ class DGMMFramework:
         if n < 2:
             return self._fallback_gmt(accumulated_grads, skip_names, layer_grads)
 
-        # ── 每层 2 维基础信号 ────────────────────────
+        # ── 每层 pos/neg/zero + stability ───────────
         raw_features: Dict[str, torch.Tensor] = {}
         for name in names:
             g = layer_grads[name]
-            raw_features[name] = torch.tensor([
-                self._direction_consistency(name, g),
-                1.0 - self._volatility(name, g),  # 稳定性 = 1 - 波动性
-            ])
+            pos, neg, zero = self._direction(g)
+            stab = 1.0 - self._stability(name, g)  # 高=稳定
+            raw_features[name] = torch.tensor([pos, neg, zero, stab])
 
-        # ── 每层 synergy ────────────────────────────
-        for name in names:
-            syn = self._layer_synergy(name, raw_features)
-            feat = torch.tensor([
-                raw_features[name][0],  # cos: 高=方向一致
-                raw_features[name][1],  # stability: 高=稳定
-                syn,                    # synergy: 高=协同
-            ])
-            if name in self.stats_ema:
-                self.stats_ema[name] = self.ema_alpha * self.stats_ema[name] + (1 - self.ema_alpha) * feat
-            else:
-                self.stats_ema[name] = feat
+        # ── 全局层间相关 ─────────────────────────────
+        feat_stack = torch.stack([raw_features[n] for n in names])
+        corr = self._correlation(feat_stack)
 
         # ── quality → keep_pct ───────────────────────
         for name in names:
-            s = self.stats_ema[name]
-            d = 0.5 if "direction" in self.ablate else s[0].item()
-            v = 0.5 if "volatility" in self.ablate else s[1].item()
-            y = 0.0 if "synergy" in self.ablate else s[2].item()
+            f = raw_features[name]
+            d = 0.5 if "direction" in self.ablate else (f[0].item() - f[1].item())  # pos - neg
+            v = 0.5 if "volatility" in self.ablate else f[3].item()  # stability
+            y = 0.0 if "synergy" in self.ablate else corr
             quality = float((+2.0 * d + 1.5 * v + 1.5 * y))
             keep = 0.89 + quality * 0.06
             keep = max(0.0, min(1.0, keep))
@@ -262,7 +222,7 @@ class DGMMFramework:
         n_show = min(3, len(sorted_layers))
         lowest = [(l[0], f"{l[1]:.3f}") for l in sorted_layers[:n_show]]
         highest = [(l[0], f"{l[1]:.3f}") for l in sorted_layers[-n_show:]]
-        avg_synergy = float(np.mean([self.stats_ema[n][2].item() for n in names]))
+        avg_synergy = float(corr)
 
         info = {
             'avg_importance': float(np.mean(target_keeps)),
