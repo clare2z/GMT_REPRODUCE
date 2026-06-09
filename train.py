@@ -249,63 +249,48 @@ class RMTTrainer:
 
 
 class GMTTrainer:
-    """梯度掩码训练 — 累积梯度后按幅度阈值掩码"""
-    def __init__(self, model, k_percent=50, accumulation_steps=4, device="cuda", lr=2e-5):
+    """梯度掩码训练 — 每步全局 top-k 幅度阈值"""
+    def __init__(self, model, k_percent=80, accumulation_steps=1, device="cuda", lr=2e-5):
         self.model = model
         self.k_percent = k_percent
-        self.accumulation_steps = accumulation_steps
         self.device = device
         self.optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+        self.keep = k_percent / 100.0  # 0.0-1.0
 
     def train_epoch(self, dataloader):
         self.model.train()
         total_loss, count = 0.0, 0
-        accumulated_grads, step_count = {}, 0
 
         for batch in dataloader:
             inputs = {"input_ids": batch["input_ids"].to(self.device), "attention_mask": batch["attention_mask"].to(self.device)}
             outputs = self.model(**inputs, labels=batch['labels'].to(self.device))
-            loss = outputs.loss / self.accumulation_steps
-            loss.backward()
+            self.optimizer.zero_grad()
+            outputs.loss.backward()
 
-            for name, param in self.model.named_parameters():
-                if param.grad is not None:
-                    if name not in accumulated_grads:
-                        accumulated_grads[name] = torch.zeros_like(param.grad)
-                    accumulated_grads[name] += param.grad
-                    param.grad = None
+            # k=100 → 跳过所有掩码，等于 SFT
+            if self.keep < 1.0:
+                all_abs = []
+                for param in self.model.parameters():
+                    if param.grad is not None:
+                        all_abs.append(param.grad.detach().abs().flatten())
+                all_flat = torch.cat(all_abs)
+                cut = max(1, int(all_flat.numel() * (1.0 - self.keep)))
+                thr = float(torch.kthvalue(all_flat, cut).values.item())
+                mask_sum, mask_total = 0.0, 0
+                for param in self.model.parameters():
+                    if param.grad is not None:
+                        mask = param.grad.abs() >= thr
+                        param.grad = param.grad * mask.float()
+                        mask_sum += float(mask.float().mean().item())
+                        mask_total += 1
 
-            total_loss += loss.item() * self.accumulation_steps
+            self.optimizer.step()
+            total_loss += outputs.loss.item()
             count += 1
-            step_count += 1
 
-            if step_count % self.accumulation_steps == 0:
-                all_grad_values = []
-                for grad in accumulated_grads.values():
-                    all_grad_values.append(grad.abs().flatten())
-
-                if all_grad_values:
-                    all_flat = torch.cat(all_grad_values)
-                    k_idx = len(all_flat) - int(len(all_flat) * self.k_percent / 100) + 1
-                    threshold = torch.kthvalue(all_flat, max(1, min(k_idx, len(all_flat)))).values
-
-                    actual_keep = 0.0
-                    n_params = 0
-                    for name, param in self.model.named_parameters():
-                        if name in accumulated_grads:
-                            param.grad = accumulated_grads[name] / self.accumulation_steps
-                            mask = param.grad.abs() >= threshold
-                            param.grad = param.grad * mask
-                            actual_keep += float(mask.float().mean().item())
-                            n_params += 1
-
-                self.optimizer.step()
-                self.optimizer.zero_grad()
-                accumulated_grads = {}
-
-                if step_count % (self.accumulation_steps * 50) == 0:
-                    ak = actual_keep / max(n_params, 1)
-                    logger.info(f"  [GMT] step {step_count} | actual_keep={ak:.3f} (target={self.k_percent/100:.2f})")
+            if count % 500 == 0 and self.keep < 1.0:
+                ak = mask_sum / max(mask_total, 1)
+                logger.info(f"  [GMT] step {count} | actual_keep={ak:.3f} (target={self.keep:.2f})")
 
         return total_loss / count if count > 0 else 0.0
 
