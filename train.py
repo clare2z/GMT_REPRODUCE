@@ -307,6 +307,8 @@ class GMTTrainer:
                     ak = actual_keep / max(n_params, 1)
                     logger.info(f"  [GMT] step {step_count} | actual_keep={ak:.3f} (target={self.k_percent/100:.2f})")
 
+        return total_loss / count if count > 0 else 0.0
+
 
 class DGMMTrainer:
     """DGMM — 动态梯度流形掩码（唯一需要 DGMM.py 的算法）"""
