@@ -384,6 +384,11 @@ ALGORITHM_PARAMS = {
 
 def create_trainer(algorithm, model, args, device):
     """工厂方法：根据算法名创建对应的 Trainer"""
+    # GMT k=100 → 直接用 SFT, 保证完全等价
+    if algorithm == "GMT" and args.k_percent >= 100:
+        logger.info("GMT k=100 → using SFTTrainer (guaranteed equivalence)")
+        return SFTTrainer(model, device=device, lr=args.lr)
+
     if algorithm not in TRAINER_MAP:
         raise ValueError(f"Unknown algorithm: {algorithm}. Choose from {list(TRAINER_MAP.keys())}")
 
