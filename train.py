@@ -289,16 +289,23 @@ class GMTTrainer:
                     k_idx = len(all_flat) - int(len(all_flat) * self.k_percent / 100) + 1
                     threshold = torch.kthvalue(all_flat, max(1, min(k_idx, len(all_flat)))).values
 
+                    actual_keep = 0.0
+                    n_params = 0
                     for name, param in self.model.named_parameters():
                         if name in accumulated_grads:
                             param.grad = accumulated_grads[name] / self.accumulation_steps
-                            param.grad = param.grad * (param.grad.abs() >= threshold)
+                            mask = param.grad.abs() >= threshold
+                            param.grad = param.grad * mask
+                            actual_keep += float(mask.float().mean().item())
+                            n_params += 1
 
                 self.optimizer.step()
                 self.optimizer.zero_grad()
                 accumulated_grads = {}
 
-        return total_loss / count if count > 0 else 0.0
+                if step_count % (self.accumulation_steps * 50) == 0:
+                    ak = actual_keep / max(n_params, 1)
+                    logger.info(f"  [GMT] step {step_count} | actual_keep={ak:.3f} (target={self.k_percent/100:.2f})")
 
 
 class DGMMTrainer:
@@ -441,7 +448,7 @@ def main():
                         help="消融: direction,volatility,synergy (逗号分隔)")
     parser.add_argument("--dgmm_encoder_dim", type=int, default=256,
                         help="DGMM: 梯度编码器隐藏维度 (默认 256)")
-    parser.add_argument("--accumulation_steps", type=int, default=4)
+    parser.add_argument("--accumulation_steps", type=int, default=1)
     parser.add_argument("--lora", action="store_true", default=False,
                         help="使用 LoRA 全精度微调（梯度信号更干净）")
     parser.add_argument("--lora_r", type=int, default=16,
