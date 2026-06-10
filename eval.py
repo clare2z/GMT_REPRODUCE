@@ -108,7 +108,20 @@ def load_model_from_checkpoint(checkpoint_path, device="cuda"):
         bnb_4bit_compute_dtype=torch.bfloat16
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
+    import json
+    base_model_name = "mistralai/Mistral-7B-v0.1"
+    cfg_path = os.path.join(checkpoint_path, "train_config.json")
+    if os.path.exists(cfg_path):
+        with open(cfg_path, "r") as f:
+            cfg = json.load(f)
+        base_model_name = cfg.get("model_name", base_model_name)
+
+    # Tokenizer: checkpoint 优先，失败回退到 base model
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
+    except Exception:
+        logger.warning(f"  Tokenizer not in checkpoint, loading from {base_model_name}")
+        tokenizer = AutoTokenizer.from_pretrained(base_model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -116,13 +129,6 @@ def load_model_from_checkpoint(checkpoint_path, device="cuda"):
     is_lora = os.path.exists(os.path.join(checkpoint_path, "adapter_config.json"))
 
     if is_lora:
-        import json
-        base_model_name = "mistralai/Mistral-7B-v0.1"
-        cfg_path = os.path.join(checkpoint_path, "train_config.json")
-        if os.path.exists(cfg_path):
-            with open(cfg_path, "r") as f:
-                cfg = json.load(f)
-            base_model_name = cfg.get("model_name", base_model_name)
         logger.info(f"  Detected LoRA adapter → base model: {base_model_name}")
         base_model = AutoModelForCausalLM.from_pretrained(
             base_model_name,
@@ -133,13 +139,24 @@ def load_model_from_checkpoint(checkpoint_path, device="cuda"):
         )
         model = PeftModel.from_pretrained(base_model, checkpoint_path)
     else:
-        model = AutoModelForCausalLM.from_pretrained(
-            checkpoint_path,
-            quantization_config=quantization_config,
-            device_map="auto",
-            torch_dtype=torch.bfloat16,
-            trust_remote_code=True
-        )
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                checkpoint_path,
+                quantization_config=quantization_config,
+                device_map="auto",
+                torch_dtype=torch.bfloat16,
+                trust_remote_code=True
+            )
+        except Exception:
+            logger.warning(f"  Full model loading failed, trying as LoRA adapter")
+            base_model = AutoModelForCausalLM.from_pretrained(
+                base_model_name,
+                quantization_config=quantization_config,
+                device_map="auto",
+                torch_dtype=torch.bfloat16,
+                trust_remote_code=True
+            )
+            model = PeftModel.from_pretrained(base_model, checkpoint_path)
     model.eval()
     logger.info(f"Model loaded. Parameters: {model.num_parameters():,}")
     return model, tokenizer
