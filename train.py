@@ -267,25 +267,29 @@ class GMTTrainer:
             self.optimizer.zero_grad()
             outputs.loss.backward()
 
-            # GMT mask: keep top keep% gradients by magnitude
+            # GMT mask: keep top keep% trainable gradients by magnitude
             if self.keep < 1.0:
-                all_abs = [p.grad.detach().abs().flatten() for p in self.model.parameters() if p.grad is not None]
-                all_flat = torch.cat(all_abs)
+                trainable_grads = [p.grad.detach().abs().flatten() for p in self.model.parameters()
+                                   if p.requires_grad and p.grad is not None]
+                all_flat = torch.cat(trainable_grads)
                 num_keep = max(1, int(all_flat.numel() * self.keep))
                 thr = float(torch.topk(all_flat, num_keep, largest=True).values.min().item())
 
-                kept_elems, total_elems = 0, 0
+                kept_elems, total_elems, n_masked = 0, 0, 0
                 for param in self.model.parameters():
-                    if param.grad is not None:
+                    if param.requires_grad and param.grad is not None:
                         mask = param.grad.abs() >= thr
                         param.grad = param.grad * mask.float()
                         kept_elems += mask.sum().item()
                         total_elems += mask.numel()
+                        n_masked += 1
 
             self.optimizer.step()
             total_loss += outputs.loss.item()
             count += 1
 
+            if self.keep < 1.0 and count == 1:
+                logger.info(f"  [GMT] masking {n_masked} trainable params | actual_keep_global={kept_elems/max(total_elems,1):.4f} target={self.keep:.4f}")
             if count % 50 == 0 and self.keep < 1.0:
                 actual_keep_global = kept_elems / max(total_elems, 1)
                 logger.info(f"  [GMT] step {count} | actual_keep_global={actual_keep_global:.4f} (target={self.keep:.4f})")
