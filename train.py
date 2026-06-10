@@ -267,30 +267,28 @@ class GMTTrainer:
             self.optimizer.zero_grad()
             outputs.loss.backward()
 
-            # k=100 → 跳过所有掩码，等于 SFT
+            # GMT mask: keep top keep% gradients by magnitude
             if self.keep < 1.0:
-                all_abs = []
-                for param in self.model.parameters():
-                    if param.grad is not None:
-                        all_abs.append(param.grad.detach().abs().flatten())
+                all_abs = [p.grad.detach().abs().flatten() for p in self.model.parameters() if p.grad is not None]
                 all_flat = torch.cat(all_abs)
-                cut = max(1, int(all_flat.numel() * (1.0 - self.keep)))
-                thr = float(torch.kthvalue(all_flat, cut).values.item())
-                mask_sum, mask_total = 0.0, 0
+                num_keep = max(1, int(all_flat.numel() * self.keep))
+                thr = float(torch.topk(all_flat, num_keep, largest=True).values.min().item())
+
+                kept_elems, total_elems = 0, 0
                 for param in self.model.parameters():
                     if param.grad is not None:
                         mask = param.grad.abs() >= thr
                         param.grad = param.grad * mask.float()
-                        mask_sum += float(mask.float().mean().item())
-                        mask_total += 1
+                        kept_elems += mask.sum().item()
+                        total_elems += mask.numel()
 
             self.optimizer.step()
             total_loss += outputs.loss.item()
             count += 1
 
             if count % 500 == 0 and self.keep < 1.0:
-                ak = mask_sum / max(mask_total, 1)
-                logger.info(f"  [GMT] step {count} | actual_keep={ak:.3f} (target={self.keep:.2f})")
+                actual_keep_global = kept_elems / max(total_elems, 1)
+                logger.info(f"  [GMT] step {count} | actual_keep_global={actual_keep_global:.4f} (target={self.keep:.4f})")
 
         return total_loss / count if count > 0 else 0.0
 
