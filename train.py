@@ -286,7 +286,7 @@ class GMTTrainer:
             total_loss += outputs.loss.item()
             count += 1
 
-            if count % 500 == 0 and self.keep < 1.0:
+            if count % 50 == 0 and self.keep < 1.0:
                 actual_keep_global = kept_elems / max(total_elems, 1)
                 logger.info(f"  [GMT] step {count} | actual_keep_global={actual_keep_global:.4f} (target={self.keep:.4f})")
 
