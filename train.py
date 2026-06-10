@@ -178,12 +178,21 @@ class DropTrainer:
 
 
 class HFTTrainer:
-    """硬阈值梯度过滤 — 只保留 top_k% 大梯度"""
+    """Half Fine-Tuning — 随机冻结一半可训练参数，只训练另一半"""
     def __init__(self, model, top_k=50, device="cuda", lr=2e-5):
         self.model = model
-        self.top_k = top_k
         self.device = device
-        self.optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+        # 随机选择要训练的一半 LoRA 参数
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        n = len(trainable_params)
+        mask = torch.rand(n) < (top_k / 100.0)  # 随机选 top_k% 保留
+        for i, p in enumerate(trainable_params):
+            if not mask[i].item():
+                p.requires_grad = False
+        frozen = sum(1 for p in trainable_params if not p.requires_grad)
+        logger.info(f"  [HFT] Frozen {frozen}/{n} trainable params, training {n-frozen}")
+        self.optimizer = torch.optim.AdamW(
+            [p for p in model.parameters() if p.requires_grad], lr=lr)
 
     def train_epoch(self, dataloader):
         self.model.train()
@@ -193,24 +202,6 @@ class HFTTrainer:
             outputs = self.model(**inputs, labels=batch['labels'].to(self.device))
             self.optimizer.zero_grad()
             outputs.loss.backward()
-
-            all_grads, grad_params = [], []
-            for param in self.model.parameters():
-                if param.grad is not None:
-                    all_grads.append(param.grad.abs().flatten())
-                    grad_params.append(param)
-
-            if all_grads:
-                all_flat = torch.cat(all_grads)
-                k_idx = len(all_flat) - int(len(all_flat) * self.top_k / 100) + 1
-                threshold = torch.kthvalue(all_flat, max(1, min(k_idx, len(all_flat)))).values
-
-                # 简化：对每层独立做 threshold
-                for param in self.model.parameters():
-                    if param.grad is not None:
-                        mask = param.grad.abs() >= threshold
-                        param.grad = param.grad * mask.float()
-
             self.optimizer.step()
             total_loss += outputs.loss.item()
             count += 1
