@@ -218,13 +218,12 @@ class HFTTrainer:
 
 
 class RMTTrainer:
-    """递归动量训练 — 用 EMA 平滑梯度"""
+    """Random Mask Tuning — 随机保留 k% 梯度"""
     def __init__(self, model, momentum=0.9, device="cuda", lr=2e-5):
         self.model = model
-        self.momentum = momentum
+        self.keep = momentum  # 重载: momentum 实际用作 keep_ratio
         self.device = device
         self.optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-        self.grad_momentum = {}
 
     def train_epoch(self, dataloader):
         self.model.train()
@@ -235,12 +234,10 @@ class RMTTrainer:
             self.optimizer.zero_grad()
             outputs.loss.backward()
 
-            for name, param in self.model.named_parameters():
-                if param.grad is not None:
-                    if name not in self.grad_momentum:
-                        self.grad_momentum[name] = torch.zeros_like(param.grad)
-                    self.grad_momentum[name] = self.momentum * self.grad_momentum[name] + (1 - self.momentum) * param.grad
-                    param.grad = self.grad_momentum[name]
+            for param in self.model.parameters():
+                if param.requires_grad and param.grad is not None:
+                    mask = torch.rand_like(param.grad) < self.keep
+                    param.grad = param.grad * mask.float()
 
             self.optimizer.step()
             total_loss += outputs.loss.item()
@@ -431,7 +428,8 @@ def main():
     # 算法特定参数
     parser.add_argument("--drop_rate", type=float, default=0.1)
     parser.add_argument("--top_k", type=int, default=50)
-    parser.add_argument("--momentum", type=float, default=0.9)
+    parser.add_argument("--momentum", type=float, default=0.9,
+                        help="RMT: 随机保留比例 (0-1)")
     parser.add_argument("--k_percent", type=int, default=80,
                         help="GMT: 保留 top-k% 梯度 (等价 keep_pct, 92→keep 92%)")
     parser.add_argument("--dgmm_warmup", type=int, default=500,
