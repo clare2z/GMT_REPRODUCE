@@ -54,8 +54,8 @@ def load_magicoder_dataset(subset=None):
         logger.info(f"Local path not found: {dataset_path}, downloading from Hugging Face...")
         dataset = load_dataset("ise-uiuc/Magicoder-Evol-Instruct-110K", split="train")
     if subset and subset < len(dataset):
-        dataset = dataset.select(range(subset))
-        logger.info(f"Dataset subset: {subset} samples")
+        dataset = dataset.shuffle(seed=42).select(range(subset))
+        logger.info(f"Dataset subset: {subset} samples (shuffled)")
     else:
         logger.info(f"Dataset loaded with {len(dataset)} samples")
     return dataset
