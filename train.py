@@ -45,7 +45,7 @@ LOCAL_PATHS = {
 # 数据加载（所有算法共用）
 # ═══════════════════════════════════════════════════════════════
 
-def load_magicoder_dataset(subset=None):
+def load_magicoder_dataset(subset=None, no_shuffle=False):
     logger.info("Loading Magicoder-Evol-Instruct-110K dataset...")
     dataset_path = LOCAL_PATHS["dataset"]
     if os.path.exists(dataset_path):
@@ -54,8 +54,12 @@ def load_magicoder_dataset(subset=None):
         logger.info(f"Local path not found: {dataset_path}, downloading from Hugging Face...")
         dataset = load_dataset("ise-uiuc/Magicoder-Evol-Instruct-110K", split="train")
     if subset and subset < len(dataset):
-        dataset = dataset.shuffle(seed=42).select(range(subset))
-        logger.info(f"Dataset subset: {subset} samples (shuffled)")
+        if no_shuffle:
+            dataset = dataset.select(range(subset))
+            logger.info(f"Dataset subset: {subset} samples (first-N, no shuffle)")
+        else:
+            dataset = dataset.shuffle(seed=42).select(range(subset))
+            logger.info(f"Dataset subset: {subset} samples (shuffled seed=42)")
     else:
         logger.info(f"Dataset loaded with {len(dataset)} samples")
     return dataset
@@ -440,6 +444,8 @@ def main():
                         help="LoRA alpha (默认 32)")
     parser.add_argument("--subset", type=int, default=None,
                         help="只用前 N 条数据（快速验证用，默认全量 110K）")
+    parser.add_argument("--no_shuffle", action="store_true", default=False,
+                        help="不 shuffle，取前 N 条（复现旧结果用）")
     args = parser.parse_args()
 
     if args.output_dir is None:
@@ -474,7 +480,7 @@ def main():
 
     # 2. 加载数据
     logger.info(">>> [2/4] Loading dataset...")
-    dataset = load_magicoder_dataset(subset=args.subset)
+    dataset = load_magicoder_dataset(subset=args.subset, no_shuffle=args.no_shuffle)
     preprocessed = preprocess_dataset(dataset, tokenizer, max_length=args.max_length)
     dataloader = create_dataloader(preprocessed, batch_size=args.batch_size)
     logger.info(f">>> [2/4] Dataloader: {len(dataloader)} batches")
