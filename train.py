@@ -34,6 +34,15 @@ from peft import LoraConfig, get_peft_model, TaskType
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
+def set_seed(seed=42):
+    import random
+    import numpy as np
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
 LOCAL_PATHS = {
     "mistralai/Mistral-7B-v0.1": "/root/autodl-tmp/model/Mistral-7B-v0.1",
     "deepseek-ai/DeepSeek-Coder-Base-6.7B": "/root/autodl-tmp/model/deepseek-coder-6.7b-base",
@@ -99,9 +108,11 @@ def preprocess_dataset(dataset, tokenizer, max_length=256):
     return dataset
 
 
-def create_dataloader(dataset, batch_size=4):
+def create_dataloader(dataset, batch_size=4, seed=42):
     dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
-    return torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    g = torch.Generator()
+    g.manual_seed(seed)
+    return torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, generator=g)
 
 
 def load_model(model_name, device="cuda", use_quantization=False):
@@ -444,9 +455,12 @@ def main():
                         help="LoRA alpha (默认 32)")
     parser.add_argument("--subset", type=int, default=None,
                         help="只用前 N 条数据（快速验证用，默认全量 110K）")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="全局随机种子 (默认 42)")
     parser.add_argument("--no_shuffle", action="store_true", default=False,
                         help="不 shuffle，取前 N 条（复现旧结果用）")
     args = parser.parse_args()
+    set_seed(args.seed)
 
     if args.output_dir is None:
         safe_name = args.model_name.replace("/", "_")
@@ -482,7 +496,7 @@ def main():
     logger.info(">>> [2/4] Loading dataset...")
     dataset = load_magicoder_dataset(subset=args.subset, no_shuffle=args.no_shuffle)
     preprocessed = preprocess_dataset(dataset, tokenizer, max_length=args.max_length)
-    dataloader = create_dataloader(preprocessed, batch_size=args.batch_size)
+    dataloader = create_dataloader(preprocessed, batch_size=args.batch_size, seed=args.seed)
     logger.info(f">>> [2/4] Dataloader: {len(dataloader)} batches")
 
     # 3. 训练
@@ -510,6 +524,9 @@ def main():
         "algorithm": args.algorithm, "model_name": args.model_name,
         "epochs": args.epochs, "batch_size": args.batch_size, "lr": args.lr,
         "max_length": args.max_length,
+        "seed": args.seed, "subset": args.subset, "no_shuffle": args.no_shuffle,
+        "lora": args.lora, "lora_r": args.lora_r, "lora_alpha": args.lora_alpha,
+        "quantize": args.quantize, "gradient_checkpointing": args.gradient_checkpointing,
         "prompt_format": "### Instruction:\n{instruction}\n\n### Response:\n{response}",
         "dgmm_disabled": os.environ.get("DGMM_DISABLED", "0"),
         "timestamp": datetime.now().isoformat(),
