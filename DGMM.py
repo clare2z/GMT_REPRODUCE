@@ -173,11 +173,11 @@ class DGMMFramework:
 
         # ── 阶段 clamp ───────────────────────────────
         if self.step_count < 500:
-            lo, hi = 0.95, 0.99
+            lo, hi = 0.99, 1.00
         elif self.step_count < 1000:
-            lo, hi = 0.92, 0.98
+            lo, hi = 0.98, 1.00
         else:
-            lo, hi = 0.90, 0.98
+            lo, hi = 0.97, 1.00
         for name in names:
             self.layer_keep[name] = max(lo, min(hi, self.layer_keep[name]))
 
