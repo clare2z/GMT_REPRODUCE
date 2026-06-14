@@ -163,8 +163,8 @@ class DGMMFramework:
             d = 0.5 if "direction" in self.ablate else (f[0].item() - f[1].item())  # pos - neg
             v = 0.5 if "volatility" in self.ablate else f[3].item()  # stability
             y = 0.0 if "synergy" in self.ablate else corr
-            quality = float((+2.0 * d + 1.5 * v + 1.5 * y))
-            keep = 0.89 + quality * 0.06
+            quality = float((+3.0 * d + 2.0 * v + 2.0 * y))
+            keep = 0.89 + quality * 0.10
             keep = max(0.0, min(1.0, keep))
             if name in self.layer_keep:
                 self.layer_keep[name] = self.ema_alpha * self.layer_keep[name] + (1 - self.ema_alpha) * keep
@@ -175,9 +175,9 @@ class DGMMFramework:
         if self.step_count < 500:
             lo, hi = 0.95, 0.99
         elif self.step_count < 1000:
-            lo, hi = 0.90, 0.98
+            lo, hi = 0.92, 0.98
         else:
-            lo, hi = 0.85, 0.98
+            lo, hi = 0.90, 0.98
         for name in names:
             self.layer_keep[name] = max(lo, min(hi, self.layer_keep[name]))
 
