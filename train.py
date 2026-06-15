@@ -409,6 +409,8 @@ def create_trainer(algorithm, model, args, device):
             "mask_floor": args.dgmm_mask_floor,
             "encoder_hidden_dim": args.dgmm_encoder_dim,
             "ablate": args.dgmm_ablate,
+            "soft_alpha": args.dgmm_soft_alpha,
+            "late_start": args.dgmm_late_start,
         }
 
     return trainer_cls(**kwargs)
@@ -442,6 +444,10 @@ def main():
                         help="DGMM: warmup 步数 (默认 500)")
     parser.add_argument("--dgmm_mask_floor", type=float, default=0.2,
                         help="DGMM: 梯度掩码最低比例 (默认 0.2)")
+    parser.add_argument("--dgmm_soft_alpha", type=float, default=0.0,
+                        help="DGMM: soft scaling alpha (0=hard zero, 0.5=缩到50%)")
+    parser.add_argument("--dgmm_late_start", type=int, default=0,
+                        help="DGMM: 延迟到 N 步后启动 mask (0=立即)")
     parser.add_argument("--dgmm_ablate", type=str, default="",
                         help="消融: direction,volatility,synergy (逗号分隔)")
     parser.add_argument("--dgmm_encoder_dim", type=int, default=256,

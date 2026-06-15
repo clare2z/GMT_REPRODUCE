@@ -60,12 +60,16 @@ class DGMMFramework:
                  device="cuda", dtype=torch.bfloat16,
                  grad_history_window=5, warmup_steps=500,
                  mask_floor=0.2, meta_lr=1e-5,
-                 ablate: str = ""):
+                 ablate: str = "",
+                 soft_alpha: float = 0.0,
+                 late_start: int = 0):
         self.ema_alpha = ema_alpha
         self.warmup_steps = warmup_steps
         self.encoder_output_dim = encoder_output_dim
         self.step_count = 0
         self.ablate = set(ablate.split(",")) if ablate else set()
+        self.soft_alpha = soft_alpha
+        self.late_start = late_start
 
         # 历史追踪
         self.grad_ema: Dict[str, torch.Tensor] = {}
@@ -203,14 +207,22 @@ class DGMMFramework:
             thr = float(torch.kthvalue(g_abs.flatten(), cut_idx).values.item())
             mask = grad.abs() >= thr
             mask_actual = float(mask.float().mean().item())
-            masked_grad = grad * mask.float().to(grad.dtype)
+
+            # soft scaling: 未选中的梯度缩放 soft_alpha 倍 (0=清零, 0.5=缩到50%)
+            m = mask.float().to(grad.dtype)
+            scale = m + (1.0 - m) * self.soft_alpha
+            masked_grad = grad * scale
 
             if self.step_count <= self.warmup_steps:
                 masked_grads[name] = grad
                 mask_keeps.append(1.0)
                 target_keeps.append(kp)
+            elif self.step_count <= self.late_start:
+                masked_grads[name] = grad
+                mask_keeps.append(1.0)
+                target_keeps.append(kp)
             else:
-                ramp = min(1.0, (self.step_count - self.warmup_steps) / max(1, self.warmup_steps))
+                ramp = min(1.0, (self.step_count - self.late_start) / max(1, self.warmup_steps))
                 masked_grads[name] = grad * (1.0 - ramp) + masked_grad * ramp
                 mask_keeps.append(mask_actual * ramp + (1 - ramp))
                 target_keeps.append(kp)
