@@ -55,7 +55,7 @@ LOCAL_PATHS = {
 # 数据加载（所有算法共用）
 # ═══════════════════════════════════════════════════════════════
 
-def load_magicoder_dataset(subset=None, no_shuffle=False):
+def load_magicoder_dataset(subset=None, no_shuffle=False, seed=42):
     logger.info("Loading Magicoder-Evol-Instruct-110K dataset...")
     dataset_path = LOCAL_PATHS["dataset"]
     if os.path.exists(dataset_path):
@@ -68,7 +68,7 @@ def load_magicoder_dataset(subset=None, no_shuffle=False):
             dataset = dataset.select(range(subset))
             logger.info(f"Dataset subset: {subset} samples (first-N, no shuffle)")
         else:
-            dataset = dataset.shuffle(seed=42).select(range(subset))
+            dataset = dataset.shuffle(seed=seed).select(range(subset))
             logger.info(f"Dataset subset: {subset} samples (shuffled seed=42)")
     else:
         logger.info(f"Dataset loaded with {len(dataset)} samples")
@@ -409,9 +409,8 @@ ALGORITHM_PARAMS = {
 }
 
 
-def create_trainer(algorithm, model, args, device):
+def create_trainer(algorithm, model, args, device, total_steps=5000):
     """工厂方法：根据算法名创建对应的 Trainer"""
-    total_steps = args.subset if args.subset else 110000
 
     # GMT k=100 → 直接用 SFT, 保证完全等价
     if algorithm == "GMT" and args.k_percent >= 100:
@@ -503,6 +502,8 @@ def main():
                         help="lr scheduler 类型 (默认 cosine)")
     parser.add_argument("--weight_decay", type=float, default=0.0,
                         help="weight decay (论文 0)")
+    parser.add_argument("--bf16", action="store_true", default=False,
+                        help="使用 bf16 训练")
     parser.add_argument("--no_shuffle", action="store_true", default=False,
                         help="不 shuffle，取前 N 条（复现旧结果用）")
     args = parser.parse_args()
@@ -540,13 +541,13 @@ def main():
 
     # 2. 加载数据
     logger.info(">>> [2/4] Loading dataset...")
-    dataset = load_magicoder_dataset(subset=args.subset, no_shuffle=args.no_shuffle)
+    dataset = load_magicoder_dataset(subset=args.subset, no_shuffle=args.no_shuffle, seed=args.seed)
     preprocessed = preprocess_dataset(dataset, tokenizer, max_length=args.max_length)
     dataloader = create_dataloader(preprocessed, batch_size=args.batch_size, seed=args.seed)
     logger.info(f">>> [2/4] Dataloader: {len(dataloader)} batches")
 
     # 3. 训练
-    trainer = create_trainer(args.algorithm, model, args, device)
+    trainer = create_trainer(args.algorithm, model, args, device, total_steps=len(dataloader) * args.epochs)
     os.makedirs(args.output_dir, exist_ok=True)
     log_rows = []
 
@@ -573,6 +574,9 @@ def main():
         "seed": args.seed, "subset": args.subset, "no_shuffle": args.no_shuffle,
         "lora": args.lora, "lora_r": args.lora_r, "lora_alpha": args.lora_alpha,
         "quantize": args.quantize, "gradient_checkpointing": args.gradient_checkpointing,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "warmup_ratio": args.warmup_ratio, "lr_scheduler_type": args.lr_scheduler_type,
+        "weight_decay": args.weight_decay, "bf16": args.bf16,
         "prompt_format": "### Instruction:\n{instruction}\n\n### Response:\n{response}",
         "dgmm_disabled": os.environ.get("DGMM_DISABLED", "0"),
         "timestamp": datetime.now().isoformat(),
