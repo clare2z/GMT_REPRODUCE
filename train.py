@@ -148,7 +148,8 @@ def load_model(model_name, device="cuda", use_quantization=False):
 class SFTTrainer:
     """标准微调 — 支持 gradient accumulation + cosine scheduler + warmup"""
     def __init__(self, model, device="cuda", lr=2e-5, weight_decay=0.0,
-                 grad_accum=1, warmup_ratio=0.03, total_steps=5000):
+                 grad_accum=1, warmup_ratio=0.03, total_steps=5000,
+                 lr_scheduler_type="cosine"):
         self.model = model
         self.device = device
         self.grad_accum = grad_accum
@@ -156,9 +157,15 @@ class SFTTrainer:
         self.optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
         num_updates = max(1, math.ceil(total_steps / grad_accum))
         num_warmup = max(1, int(num_updates * warmup_ratio))
-        from transformers import get_cosine_schedule_with_warmup
-        self.scheduler = get_cosine_schedule_with_warmup(
-            self.optimizer, num_warmup_steps=num_warmup, num_training_steps=num_updates)
+        if warmup_ratio <= 0 or lr_scheduler_type == "constant":
+            from torch.optim.lr_scheduler import LambdaLR
+            self.scheduler = LambdaLR(self.optimizer, lambda step: 1.0)
+            logger.info("  [SFT] constant lr (no scheduler)")
+        else:
+            from transformers import get_cosine_schedule_with_warmup
+            self.scheduler = get_cosine_schedule_with_warmup(
+                self.optimizer, num_warmup_steps=num_warmup, num_training_steps=num_updates)
+            logger.info(f"  [SFT] cosine scheduler: warmup={num_warmup}/{num_updates}")
 
     def train_epoch(self, dataloader):
         self.model.train()
@@ -184,7 +191,8 @@ class SFTTrainer:
 class DropTrainer:
     """随机梯度丢弃"""
     def __init__(self, model, drop_rate=0.1, device="cuda", lr=2e-5,
-                 weight_decay=0.0, grad_accum=1, warmup_ratio=0.03, total_steps=5000):
+                 weight_decay=0.0, grad_accum=1, warmup_ratio=0.03, total_steps=5000,
+                 lr_scheduler_type="cosine"):
         self.model = model
         self.drop_rate = drop_rate
         self.device = device
@@ -211,7 +219,8 @@ class DropTrainer:
 class HFTTrainer:
     """Half Fine-Tuning — 随机冻结一半可训练参数，只训练另一半"""
     def __init__(self, model, top_k=50, device="cuda", lr=2e-5,
-                 weight_decay=0.0, grad_accum=1, warmup_ratio=0.03, total_steps=5000):
+                 weight_decay=0.0, grad_accum=1, warmup_ratio=0.03, total_steps=5000,
+                 lr_scheduler_type="cosine"):
         self.model = model
         self.device = device
         trainable_params = [p for p in model.parameters() if p.requires_grad]
@@ -242,7 +251,8 @@ class HFTTrainer:
 class RMTTrainer:
     """Random Mask Tuning — 随机保留 k% 梯度"""
     def __init__(self, model, momentum=0.9, device="cuda", lr=2e-5,
-                 weight_decay=0.0, grad_accum=1, warmup_ratio=0.03, total_steps=5000):
+                 weight_decay=0.0, grad_accum=1, warmup_ratio=0.03, total_steps=5000,
+                 lr_scheduler_type="cosine"):
         self.model = model
         self.keep = momentum
         self.device = device
@@ -272,7 +282,8 @@ class RMTTrainer:
 class GMTTrainer:
     """梯度掩码训练 — 每步全局 top-k 幅度阈值"""
     def __init__(self, model, k_percent=80, accumulation_steps=1, device="cuda", lr=2e-5,
-                 weight_decay=0.0, grad_accum=1, warmup_ratio=0.03, total_steps=5000):
+                 weight_decay=0.0, grad_accum=1, warmup_ratio=0.03, total_steps=5000,
+                 lr_scheduler_type="cosine"):
         self.model = model
         self.k_percent = k_percent
         self.device = device
@@ -323,7 +334,8 @@ class GMTTrainer:
 class DGMMTrainer:
     """DGMM — 动态梯度流形掩码（唯一需要 DGMM.py 的算法）"""
     def __init__(self, model, device="cuda", lr=2e-5, dgmm_config=None,
-                 weight_decay=0.0, grad_accum=1, warmup_ratio=0.03, total_steps=5000):
+                 weight_decay=0.0, grad_accum=1, warmup_ratio=0.03, total_steps=5000,
+                 lr_scheduler_type="cosine"):
         self.model = model
         self.device = device
         params = [p for p in model.parameters() if p.requires_grad]
@@ -417,7 +429,8 @@ def create_trainer(algorithm, model, args, device, total_steps=5000):
         logger.info("GMT k=100 → using SFTTrainer (guaranteed equivalence)")
         return SFTTrainer(model, device=device, lr=args.lr, weight_decay=args.weight_decay,
                           grad_accum=args.gradient_accumulation_steps,
-                          warmup_ratio=args.warmup_ratio, total_steps=total_steps)
+                          warmup_ratio=args.warmup_ratio, total_steps=total_steps,
+                          lr_scheduler_type=args.lr_scheduler_type)
 
     if algorithm not in TRAINER_MAP:
         raise ValueError(f"Unknown algorithm: {algorithm}. Choose from {list(TRAINER_MAP.keys())}")
@@ -430,6 +443,7 @@ def create_trainer(algorithm, model, args, device, total_steps=5000):
     kwargs["grad_accum"] = args.gradient_accumulation_steps
     kwargs["warmup_ratio"] = args.warmup_ratio
     kwargs["total_steps"] = total_steps
+    kwargs["lr_scheduler_type"] = args.lr_scheduler_type
 
     for param in ALGORITHM_PARAMS.get(algorithm, []):
         kwargs[param] = getattr(args, param)
