@@ -25,6 +25,7 @@ import logging
 import csv
 import time
 import json
+import math
 import argparse
 from datetime import datetime
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
@@ -145,23 +146,36 @@ def load_model(model_name, device="cuda", use_quantization=False):
 # ═══════════════════════════════════════════════════════════════
 
 class SFTTrainer:
-    """标准微调 — 无梯度干预"""
-    def __init__(self, model, device="cuda", lr=2e-5):
+    """标准微调 — 支持 gradient accumulation + cosine scheduler + warmup"""
+    def __init__(self, model, device="cuda", lr=2e-5, weight_decay=0.0,
+                 grad_accum=1, warmup_ratio=0.03, total_steps=5000):
         self.model = model
         self.device = device
-        self.optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+        self.grad_accum = grad_accum
+        params = [p for p in model.parameters() if p.requires_grad]
+        self.optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
+        num_updates = max(1, math.ceil(total_steps / grad_accum))
+        num_warmup = max(1, int(num_updates * warmup_ratio))
+        from transformers import get_cosine_schedule_with_warmup
+        self.scheduler = get_cosine_schedule_with_warmup(
+            self.optimizer, num_warmup_steps=num_warmup, num_training_steps=num_updates)
 
     def train_epoch(self, dataloader):
         self.model.train()
-        total_loss, count = 0.0, 0
+        total_loss, count, update_count = 0.0, 0, 0
         for batch in dataloader:
             inputs = {"input_ids": batch["input_ids"].to(self.device), "attention_mask": batch["attention_mask"].to(self.device)}
             outputs = self.model(**inputs, labels=batch['labels'].to(self.device))
-            self.optimizer.zero_grad()
-            outputs.loss.backward()
-            self.optimizer.step()
+            loss = outputs.loss / self.grad_accum
+            loss.backward()
             total_loss += outputs.loss.item()
             count += 1
+
+            if count % self.grad_accum == 0:
+                self.optimizer.step()
+                self.scheduler.step()
+                self.optimizer.zero_grad()
+                update_count += 1
             if torch.isnan(outputs.loss) or torch.isinf(outputs.loss):
                 return float('nan')
         return total_loss / count if count > 0 else 0.0
@@ -169,11 +183,13 @@ class SFTTrainer:
 
 class DropTrainer:
     """随机梯度丢弃"""
-    def __init__(self, model, drop_rate=0.1, device="cuda", lr=2e-5):
+    def __init__(self, model, drop_rate=0.1, device="cuda", lr=2e-5,
+                 weight_decay=0.0, grad_accum=1, warmup_ratio=0.03, total_steps=5000):
         self.model = model
         self.drop_rate = drop_rate
         self.device = device
-        self.optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+        params = [p for p in model.parameters() if p.requires_grad]
+        self.optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
 
     def train_epoch(self, dataloader):
         self.model.train()
@@ -194,20 +210,20 @@ class DropTrainer:
 
 class HFTTrainer:
     """Half Fine-Tuning — 随机冻结一半可训练参数，只训练另一半"""
-    def __init__(self, model, top_k=50, device="cuda", lr=2e-5):
+    def __init__(self, model, top_k=50, device="cuda", lr=2e-5,
+                 weight_decay=0.0, grad_accum=1, warmup_ratio=0.03, total_steps=5000):
         self.model = model
         self.device = device
-        # 随机选择要训练的一半 LoRA 参数
         trainable_params = [p for p in model.parameters() if p.requires_grad]
         n = len(trainable_params)
-        mask = torch.rand(n) < (top_k / 100.0)  # 随机选 top_k% 保留
+        mask = torch.rand(n) < (top_k / 100.0)
         for i, p in enumerate(trainable_params):
             if not mask[i].item():
                 p.requires_grad = False
         frozen = sum(1 for p in trainable_params if not p.requires_grad)
         logger.info(f"  [HFT] Frozen {frozen}/{n} trainable params, training {n-frozen}")
         self.optimizer = torch.optim.AdamW(
-            [p for p in model.parameters() if p.requires_grad], lr=lr)
+            [p for p in model.parameters() if p.requires_grad], lr=lr, weight_decay=weight_decay)
 
     def train_epoch(self, dataloader):
         self.model.train()
@@ -225,11 +241,13 @@ class HFTTrainer:
 
 class RMTTrainer:
     """Random Mask Tuning — 随机保留 k% 梯度"""
-    def __init__(self, model, momentum=0.9, device="cuda", lr=2e-5):
+    def __init__(self, model, momentum=0.9, device="cuda", lr=2e-5,
+                 weight_decay=0.0, grad_accum=1, warmup_ratio=0.03, total_steps=5000):
         self.model = model
-        self.keep = momentum  # 重载: momentum 实际用作 keep_ratio
+        self.keep = momentum
         self.device = device
-        self.optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+        params = [p for p in model.parameters() if p.requires_grad]
+        self.optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
 
     def train_epoch(self, dataloader):
         self.model.train()
@@ -253,12 +271,14 @@ class RMTTrainer:
 
 class GMTTrainer:
     """梯度掩码训练 — 每步全局 top-k 幅度阈值"""
-    def __init__(self, model, k_percent=80, accumulation_steps=1, device="cuda", lr=2e-5):
+    def __init__(self, model, k_percent=80, accumulation_steps=1, device="cuda", lr=2e-5,
+                 weight_decay=0.0, grad_accum=1, warmup_ratio=0.03, total_steps=5000):
         self.model = model
         self.k_percent = k_percent
         self.device = device
-        self.optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-        self.keep = k_percent / 100.0  # 0.0-1.0
+        params = [p for p in model.parameters() if p.requires_grad]
+        self.optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
+        self.keep = k_percent / 100.0
 
     def train_epoch(self, dataloader):
         self.model.train()
@@ -302,10 +322,12 @@ class GMTTrainer:
 
 class DGMMTrainer:
     """DGMM — 动态梯度流形掩码（唯一需要 DGMM.py 的算法）"""
-    def __init__(self, model, device="cuda", lr=2e-5, dgmm_config=None):
+    def __init__(self, model, device="cuda", lr=2e-5, dgmm_config=None,
+                 weight_decay=0.0, grad_accum=1, warmup_ratio=0.03, total_steps=5000):
         self.model = model
         self.device = device
-        self.optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+        params = [p for p in model.parameters() if p.requires_grad]
+        self.optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from DGMM import DGMMFramework
         self.dgmm = DGMMFramework(device=device, **(dgmm_config or {}))
@@ -389,16 +411,26 @@ ALGORITHM_PARAMS = {
 
 def create_trainer(algorithm, model, args, device):
     """工厂方法：根据算法名创建对应的 Trainer"""
+    total_steps = args.subset if args.subset else 110000
+
     # GMT k=100 → 直接用 SFT, 保证完全等价
     if algorithm == "GMT" and args.k_percent >= 100:
         logger.info("GMT k=100 → using SFTTrainer (guaranteed equivalence)")
-        return SFTTrainer(model, device=device, lr=args.lr)
+        return SFTTrainer(model, device=device, lr=args.lr, weight_decay=args.weight_decay,
+                          grad_accum=args.gradient_accumulation_steps,
+                          warmup_ratio=args.warmup_ratio, total_steps=total_steps)
 
     if algorithm not in TRAINER_MAP:
         raise ValueError(f"Unknown algorithm: {algorithm}. Choose from {list(TRAINER_MAP.keys())}")
 
     trainer_cls = TRAINER_MAP[algorithm]
     kwargs = {"model": model, "device": device, "lr": args.lr}
+
+    # Paper-style params for all trainers
+    kwargs["weight_decay"] = args.weight_decay
+    kwargs["grad_accum"] = args.gradient_accumulation_steps
+    kwargs["warmup_ratio"] = args.warmup_ratio
+    kwargs["total_steps"] = total_steps
 
     for param in ALGORITHM_PARAMS.get(algorithm, []):
         kwargs[param] = getattr(args, param)
@@ -463,6 +495,14 @@ def main():
                         help="只用前 N 条数据（快速验证用，默认全量 110K）")
     parser.add_argument("--seed", type=int, default=42,
                         help="全局随机种子 (默认 42)")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
+                        help="梯度累积步数 (默认 1)")
+    parser.add_argument("--warmup_ratio", type=float, default=0.03,
+                        help="warmup 比例 (默认 0.03)")
+    parser.add_argument("--lr_scheduler_type", type=str, default="cosine",
+                        help="lr scheduler 类型 (默认 cosine)")
+    parser.add_argument("--weight_decay", type=float, default=0.0,
+                        help="weight decay (论文 0)")
     parser.add_argument("--no_shuffle", action="store_true", default=False,
                         help="不 shuffle，取前 N 条（复现旧结果用）")
     args = parser.parse_args()
