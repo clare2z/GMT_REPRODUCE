@@ -476,7 +476,7 @@ def main():
     parser.add_argument("--max_length", type=int, default=256)
     parser.add_argument("--output_dir", type=str, default=None,
                         help="Checkpoint output dir (default: checkpoints/{model}_{algorithm})")
-    parser.add_argument("--quantize", action="store_true", default=True)
+    parser.add_argument("--quantize", action="store_true", default=False)
     parser.add_argument("--gradient_checkpointing", action="store_true", default=True)
     # 算法特定参数
     parser.add_argument("--drop_rate", type=float, default=0.1)
@@ -537,6 +537,9 @@ def main():
     # LoRA 下不用 4-bit，需要全精度梯度
     use_quant = args.quantize and not args.lora
     model, tokenizer = load_model(args.model_name, device, use_quantization=use_quant)
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    all_params = sum(p.numel() for p in model.parameters())
+    logger.info(f"Trainable: {trainable:,} / {all_params:,} ({100*trainable/all_params:.1f}%)")
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
 
