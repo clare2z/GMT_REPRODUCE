@@ -129,7 +129,6 @@ def load_model_from_checkpoint(checkpoint_path, device="cuda"):
     is_lora = os.path.exists(os.path.join(checkpoint_path, "adapter_config.json"))
 
     if is_lora:
-        logger.info(f"  Detected LoRA adapter → base model: {base_model_name}")
         base_model = AutoModelForCausalLM.from_pretrained(
             base_model_name,
             quantization_config=quantization_config,
@@ -137,26 +136,16 @@ def load_model_from_checkpoint(checkpoint_path, device="cuda"):
             torch_dtype=torch.bfloat16,
             trust_remote_code=True
         )
+        logger.info(f"  Detected LoRA adapter → loading adapter")
         model = PeftModel.from_pretrained(base_model, checkpoint_path)
     else:
-        try:
-            model = AutoModelForCausalLM.from_pretrained(
-                checkpoint_path,
-                quantization_config=quantization_config,
-                device_map="auto",
-                torch_dtype=torch.bfloat16,
-                trust_remote_code=True
-            )
-        except Exception:
-            logger.warning(f"  Full model loading failed, trying as LoRA adapter")
-            base_model = AutoModelForCausalLM.from_pretrained(
-                base_model_name,
-                quantization_config=quantization_config,
-                device_map="auto",
-                torch_dtype=torch.bfloat16,
-                trust_remote_code=True
-            )
-            model = PeftModel.from_pretrained(base_model, checkpoint_path)
+        logger.info(f"  Full model checkpoint → loading from {checkpoint_path}")
+        model = AutoModelForCausalLM.from_pretrained(
+            checkpoint_path,
+            device_map="auto",
+            torch_dtype=torch.bfloat16,
+            trust_remote_code=True
+        )
     model.eval()
     logger.info(f"Model loaded. Parameters: {model.num_parameters():,}")
     return model, tokenizer
