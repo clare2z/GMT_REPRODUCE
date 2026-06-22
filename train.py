@@ -81,8 +81,8 @@ def preprocess_dataset(dataset, tokenizer, max_length=256):
         instructions = examples['instruction']
         responses = examples['response']
 
-        # 完整文本
-        full_texts = [f"### Instruction:\n{inst}\n\n### Response:\n{resp}"
+        # 完整文本（strip 去首尾空白，加 EOS 防模型学会输出换行）
+        full_texts = [f"### Instruction:\n{inst.strip()}\n\n### Response:\n{resp.strip()}{tokenizer.eos_token}"
                       for inst, resp in zip(instructions, responses)]
         tokenized = tokenizer(full_texts, truncation=True, max_length=max_length, padding="max_length")
 
@@ -90,7 +90,7 @@ def preprocess_dataset(dataset, tokenizer, max_length=256):
         labels = []
         for i, (inst, resp) in enumerate(zip(instructions, responses)):
             # 计算 instruction 前缀的 token 数
-            prefix = f"### Instruction:\n{inst}\n\n### Response:\n"
+            prefix = f"### Instruction:\n{inst.strip()}\n\n### Response:\n"
             prefix_tokens = tokenizer(prefix, truncation=True, max_length=max_length)["input_ids"]
             # 去掉 BOS token（tokenizer 自动加的），用实际 token 数对齐
             prefix_len = len(prefix_tokens) - 1 if tokenizer.bos_token_id is not None else len(prefix_tokens)
