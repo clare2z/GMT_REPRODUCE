@@ -263,11 +263,20 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda", max_s
         generated_ids = outputs[0][input_len:]
         generated_code = tokenizer.decode(generated_ids, skip_special_tokens=True)
 
+        # debug: 打印原始生成
+        if i < 5:
+            print(f"[RAW #{i+1}] input_len={input_len}, output_len={outputs.shape[1]}, gen_tokens={len(generated_ids)}")
+            print(f"[RAW #{i+1}] generated: {repr(generated_code[:300])}")
+
         if not generated_code.strip():
+            if i < 5:
+                print(f"[RAW #{i+1}] EMPTY — skipping")
             continue
 
         generated_code = _clean_generated_code(generated_code)
         if not generated_code.strip():
+            if i < 5:
+                print(f"[RAW #{i+1}] cleaned to EMPTY — skipping")
             continue
 
         # 如果生成代码开头重复了函数签名（MBPP 常见），去掉第一行 def
