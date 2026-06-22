@@ -59,34 +59,34 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════
 
 def _clean_generated_code(text: str) -> str:
-    """清洗生成代码：去除 markdown 包装、解释性文字、不完整 docstring 等"""
+    """清洗生成代码：定位第一个函数定义，从 def 开始截取"""
     code = text.strip()
 
-    # 1. 去除首尾的 markdown 代码块标记
-    code = re.sub(r'^```(?:python|python3)?\s*\n?', '', code, flags=re.MULTILINE)
-    code = re.sub(r'\n?```\s*$', '', code)
+    # 1. 去除 markdown 代码块标记
+    code = code.replace("```python", "").replace("```Python", "").replace("```", "").strip()
 
-    # 2. 提取完整 markdown 代码块
+    # 2. 提取 markdown 代码块内容 (```...```)
     md_match = re.search(r'```(?:python)?\s*\n(.*?)\n```', code, re.DOTALL)
     if md_match:
         code = md_match.group(1).strip()
 
-    # 3. 去除开头的解释性文字
-    match = re.search(r'\n(def |class |import |from |\nif |\nfor |\nwhile )', code)
-    if match and match.start() > 80:
-        code = code[match.start() + 1:].strip()
+    # 3. 找到第一个 def —— 从这里开始截取（跳过所有解释文字）
+    def_match = re.search(r'(def\s+\w+\s*\([^)]*\)\s*:)', code)
+    if def_match:
+        code = code[def_match.start():]
 
-    # 4. 定位第一个 def/class/import
-    if not re.match(r'(def |class |import |from |[ \t]+)', code):
-        first_def = re.search(r'\n(def |class )', code)
-        if first_def and first_def.start() > 50:
-            code = code[first_def.start() + 1:].strip()
+    # 4. 没 def 时尝试从 import/class 开始
+    elif not re.match(r'(def |class |import |from |[ \t]+)', code):
+        for kw in ['import ', 'from ', 'class ']:
+            m = re.search(f'\n({kw})', code)
+            if m and m.start() > 30:
+                code = code[m.start() + 1:].strip()
+                break
 
     # 5. 修复未闭合的三引号
     triple_count = code.count('"""')
     if triple_count % 2 != 0:
-        last_triple = code.rfind('"""')
-        code = code[:last_triple].rstrip()
+        code = code[:code.rfind('"""')].rstrip()
 
     return code
 
