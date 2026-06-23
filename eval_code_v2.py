@@ -105,14 +105,21 @@ def main():
 
     if args.eval_only:
         print(f"Eval-only mode: evaluating {args.eval_only}")
+        from types import SimpleNamespace
         from evalplus.evaluate import evaluate as ep_evaluate
-        import inspect
-        sig = inspect.signature(ep_evaluate)
-        params = list(sig.parameters.keys())
-        if 'samples' in params:
-            ep_evaluate(samples=args.eval_only, dataset="humaneval", parallel=1)
-        else:
-            ep_evaluate(args.eval_only, dataset="humaneval")
+        flags = SimpleNamespace(
+            dataset="humaneval",
+            samples=args.eval_only,
+            base_only=False,
+            parallel=1,
+            i_just_wanna_run=False,
+            test_details=False,
+            min_time_limit=0.2,
+            gt_time_limit_factor=4.0,
+            mini=False,
+            noextreme=False,
+        )
+        ep_evaluate(flags)
         return
 
     load_kwargs = {"torch_dtype": torch.bfloat16}
