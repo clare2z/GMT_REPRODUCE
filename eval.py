@@ -316,16 +316,24 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda", max_s
         # HumanEval+: prompt=函数签名, test=测试代码(可能含check调用)
         # MBPP+:     prompt=函数签名, test=测试代码(含check调用)
 
+        # 如果生成代码包含完整函数定义，去掉第一行 def（避免嵌套）
+        if entry_point and generated_code.strip().startswith('def ' + entry_point):
+            generated_code = generated_code.strip().split('\n', 1)[1] if '\n' in generated_code else generated_code
+
         try:
             # 路径 1: prompt 是合法 Python（HumanEval 系），拼接后 exec
             exec_globals = {}
             full_code = prompt + "\n" + generated_code + "\n" + test
             if entry_point and 'check' in test and f"check({entry_point})" not in test:
                 full_code += f"\ncheck({entry_point})"
+            if i < 3:
+                print(f"[FULL_CODE #{i+1}]\n{full_code[:800]}\n[/FULL_CODE]")
             with exec_timeout(5):
                 exec(full_code, exec_globals)
             correct += 1
-        except Exception:
+        except Exception as e:
+            if i < 3:
+                print(f"[EXEC ERR #{i+1}] {type(e).__name__}: {e}")
             try:
                 # 路径 2: prompt 是自然语言（MBPP），只用 generated_code + test
                 with exec_timeout(5):
