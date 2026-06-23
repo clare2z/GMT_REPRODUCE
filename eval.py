@@ -211,6 +211,7 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda", max_s
     correct = 0
     t_start = time.time()
     total_generated = 0
+    err_stats = {'empty': 0, 'syntax': 0, 'assert': 0, 'timeout': 0, 'incomplete': 0, 'other': 0}
 
     # 检测数据集格式（不同数据集字段名不同）
     first_ex = dataset[0] if isinstance(dataset, list) else dataset[0]
@@ -247,14 +248,14 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda", max_s
                     test = test_imports + '\n' + test
 
         # 训练格式一致的 prompt 包装
-        full_prompt = f"### Instruction:\n{prompt}\n\n### Response:\n"
+        full_prompt = f"### Instruction:\nComplete the following Python function. Output only Python code.\n\n{prompt}\n\n### Response:\n"
         inputs = tokenizer(full_prompt, return_tensors="pt").to(device)
         input_len = inputs.input_ids.shape[1]
 
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=512,
+                max_new_tokens=768,
                 temperature=0.0,
                 top_k=1,
                 pad_token_id=tokenizer.eos_token_id
@@ -332,10 +333,14 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda", max_s
                 exec(full_code, exec_globals)
             correct += 1
         except Exception as e:
-            if i < 3:
-                print(f"[EXEC ERR #{i+1}] {type(e).__name__}: {e}")
+            ename = type(e).__name__
+            if ename == 'ExecTimeoutError': err_stats['timeout'] += 1
+            elif 'Syntax' in ename or 'Indentation' in ename: err_stats['syntax'] += 1
+            elif 'Assertion' in ename: err_stats['assert'] += 1
+            elif 'Incomplete' in str(e) or 'EOF' in str(e): err_stats['incomplete'] += 1
+            elif generated_code.strip(): err_stats['other'] += 1
+            else: err_stats['empty'] += 1
             try:
-                # 路径 2: prompt 是自然语言（MBPP），只用 generated_code + test
                 with exec_timeout(5):
                     exec(generated_code + "\n" + test, {})
                 correct += 1
@@ -353,6 +358,9 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda", max_s
     logger.info(f"  [{benchmark_name}] Done | generated: {total_generated}/{total} | "
                 f"correct: {correct}/{total} | pass@1={pass_rate:.4f} | "
                 f"elapsed={time.time()-t_start:.0f}s")
+    logger.info(f"  [ERR STATS] empty={err_stats['empty']} syntax={err_stats['syntax']} "
+                f"assert={err_stats['assert']} timeout={err_stats['timeout']} "
+                f"incomplete={err_stats['incomplete']} other={err_stats['other']}")
     return pass_rate
 
 
