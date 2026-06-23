@@ -52,11 +52,18 @@ def generate_and_save(model, tokenizer, problems, prompt_template, jsonl_path,
 
 
 def run_evalplus(jsonl_path: str, dataset: str) -> dict:
-    from evalplus.evaluate import evaluate
+    from evalplus import evaluate as ep_evaluate
     buf = io.StringIO()
     try:
         with __import__('contextlib').redirect_stdout(buf):
-            evaluate(samples=jsonl_path, dataset=dataset, parallel=1)
+            # 兼容不同 EvalPlus 版本
+            import inspect
+            sig = inspect.signature(ep_evaluate.evaluate)
+            params = list(sig.parameters.keys())
+            if 'samples' in params:
+                ep_evaluate.evaluate(samples=jsonl_path, dataset=dataset, parallel=1)
+            else:
+                ep_evaluate.evaluate(jsonl_path, dataset=dataset)
     except Exception as e:
         print(f"[EvalPlus ERROR] {type(e).__name__}: {e}")
         import traceback
