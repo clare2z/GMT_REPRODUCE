@@ -70,8 +70,8 @@ def _clean_generated_code(text: str) -> str:
     if md_match:
         code = md_match.group(1).strip()
 
-    # 3. 找到第一个 def —— 从这里开始截取（跳过所有解释文字）
-    def_match = re.search(r'(def\s+\w+\s*\([^)]*\)\s*:)', code)
+    # 3. 找到第一个 def —— 支持返回类型注解 (-> Type)
+    def_match = re.search(r'(def\s+\w+\s*\([^)]*\)(?:\s*->\s*\w+)?\s*:)', code)
     if def_match:
         code = code[def_match.start():]
 
