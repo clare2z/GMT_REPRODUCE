@@ -327,7 +327,7 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda", max_s
             if entry_point and 'check' in test and f"check({entry_point})" not in test:
                 full_code += f"\ncheck({entry_point})"
             if i < 3:
-                print(f"[FULL_CODE #{i+1}]\n{full_code[:800]}\n[/FULL_CODE]")
+                print(f"[FULL_CODE #{i+1}]\n{full_code[:3000]}\n[/FULL_CODE]")
             with exec_timeout(5):
                 exec(full_code, exec_globals)
             correct += 1
