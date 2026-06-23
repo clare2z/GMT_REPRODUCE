@@ -1,6 +1,6 @@
 """
 Code generation evaluation: HumanEval(+) and MBPP(+).
-Generates code, saves to JSONL, runs evalplus.evaluate for reliable base+plus scoring.
+Uses EvalPlus official evaluate + training-consistent prompt.
 """
 
 from __future__ import annotations
@@ -12,22 +12,7 @@ from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
-CODE_PROMPT = (
-    "<｜begin▁of▁sentence｜>You are an AI programming assistant. "
-    "You only answer questions related to computer science.\n"
-    "### Instruction:\n{instruction}\n### Response:\n"
-)
-MISTRAL_PROMPT = "[INST] {instruction} [/INST]"
-OUR_PROMPT = "### Instruction:
-{instruction}
-
-### Response:
-"
-OUR_PROMPT = "### Instruction:
-{instruction}
-
-### Response:
-"
+OUR_PROMPT = "### Instruction:\n{instruction}\n\n### Response:\n"
 
 
 def generate_code(model, tokenizer, prompt, max_tokens=512, temperature=0.0):
@@ -67,7 +52,6 @@ def generate_and_save(model, tokenizer, problems, prompt_template, jsonl_path,
 
 
 def run_evalplus(jsonl_path: str, dataset: str) -> dict:
-    """Run evalplus.evaluate and parse printed results."""
     from evalplus.evaluate import evaluate
     buf = io.StringIO()
     with __import__('contextlib').redirect_stdout(buf):
@@ -75,8 +59,6 @@ def run_evalplus(jsonl_path: str, dataset: str) -> dict:
     text = buf.getvalue()
     print(text)
 
-    # Parse all lines for pass@1 scores
-    # evalplus outputs benchmark name and score on SEPARATE lines
     results = {}
     prev_line = ''
     for line in text.split('\n'):
@@ -101,12 +83,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--tasks", type=str, nargs="+", default=["humaneval"])
-    parser.add_argument("--model_type", type=str, default="deepseek", choices=["deepseek", "mistral"])
     parser.add_argument("--use_8bit", action="store_true")
-    parser.add_argument("--num_samples", type=int, default=1,
-                        help="Number of samples per problem for pass@k")
-    parser.add_argument("--temperature", type=float, default=0.0,
-                        help="Temperature for sampling (0.0 = greedy)")
+    parser.add_argument("--num_samples", type=int, default=1)
+    parser.add_argument("--temperature", type=float, default=0.0)
     args = parser.parse_args()
 
     load_kwargs = {"torch_dtype": torch.bfloat16}
@@ -120,7 +99,7 @@ def main():
         model = model.cuda()
     model.eval()
 
-    template = OUR_PROMPT if args.model_type == "mistral" else CODE_PROMPT
+    template = OUR_PROMPT
     all_results = {}
     tmp = Path(args.model_path) / "evalplus_temp"
     tmp.mkdir(parents=True, exist_ok=True)
@@ -145,20 +124,18 @@ def main():
         res = run_evalplus(path, "mbpp")
         all_results.update(res)
 
-    # Summary
     valid = [v for v in all_results.values() if v is not None]
     avg = sum(valid) / len(valid) if valid else 0
 
     print()
     print("=" * 50)
-    print("  Code Generation Results")
+    print("  Code Generation Results (EvalPlus)")
     print("=" * 50)
     for k, v in all_results.items():
         print(f"  {k:20s}: {v:.1f}")
     print(f"  {'Average':20s}: {avg:.1f}")
     print("=" * 50)
 
-    # Save
     result_file = os.path.join(args.model_path, "eval_results.json")
     all_results["Average"] = avg
     with open(result_file, "w") as f:
