@@ -254,7 +254,7 @@ def evaluate_on_benchmark(model, tokenizer, benchmark_name, device="cuda", max_s
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=256,
+                max_new_tokens=512,
                 temperature=0.0,
                 top_k=1,
                 pad_token_id=tokenizer.eos_token_id
