@@ -99,7 +99,21 @@ def main():
     parser.add_argument("--use_8bit", action="store_true")
     parser.add_argument("--num_samples", type=int, default=1)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--eval_only", type=str, default="",
+                        help="跳过生成，直接评已有 jsonl 文件")
     args = parser.parse_args()
+
+    if args.eval_only:
+        print(f"Eval-only mode: evaluating {args.eval_only}")
+        from evalplus.evaluate import evaluate as ep_evaluate
+        import inspect
+        sig = inspect.signature(ep_evaluate)
+        params = list(sig.parameters.keys())
+        if 'samples' in params:
+            ep_evaluate(samples=args.eval_only, dataset="humaneval", parallel=1)
+        else:
+            ep_evaluate(args.eval_only, dataset="humaneval")
+        return
 
     load_kwargs = {"torch_dtype": torch.bfloat16}
     if args.use_8bit:
