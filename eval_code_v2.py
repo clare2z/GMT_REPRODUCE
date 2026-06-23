@@ -53,24 +53,28 @@ def generate_and_save(model, tokenizer, problems, prompt_template, jsonl_path,
 
 
 def run_evalplus(jsonl_path: str, dataset: str) -> dict:
-    from evalplus import evaluate as ep_evaluate
-    buf = io.StringIO()
+    import contextlib
+    buf_stdout = io.StringIO()
+    buf_stderr = io.StringIO()
     try:
-        with __import__('contextlib').redirect_stdout(buf):
-            # 兼容不同 EvalPlus 版本
-            import inspect
-            sig = inspect.signature(ep_evaluate.evaluate)
-            params = list(sig.parameters.keys())
-            if 'samples' in params:
-                ep_evaluate.evaluate(samples=jsonl_path, dataset=dataset, parallel=1)
-            else:
-                ep_evaluate.evaluate(jsonl_path, dataset=dataset)
+        with contextlib.redirect_stdout(buf_stdout), contextlib.redirect_stderr(buf_stderr):
+            ep_evaluate.evaluate(jsonl_path, dataset=dataset)
+    except TypeError:
+        with contextlib.redirect_stdout(buf_stdout), contextlib.redirect_stderr(buf_stderr):
+            from types import SimpleNamespace
+            ep_evaluate.evaluate(SimpleNamespace(
+                dataset=dataset, samples=jsonl_path,
+                base_only=False, parallel=1,
+                i_just_wanna_run=False, test_details=False,
+                min_time_limit=0.2, gt_time_limit_factor=4.0,
+                mini=False, noextreme=False,
+            ))
     except Exception as e:
         print(f"[EvalPlus ERROR] {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
         return {}
-    text = buf.getvalue()
+    text = buf_stdout.getvalue() + buf_stderr.getvalue()
     print(text)
 
     results = {}
@@ -106,21 +110,14 @@ def main():
 
     if args.eval_only:
         print(f"Eval-only mode: evaluating {args.eval_only}")
-        from types import SimpleNamespace
-        from evalplus.evaluate import evaluate as ep_evaluate
-        flags = SimpleNamespace(
-            dataset="humaneval",
-            samples=args.eval_only,
-            base_only=False,
-            parallel=1,
-            i_just_wanna_run=False,
-            test_details=False,
-            min_time_limit=0.2,
-            gt_time_limit_factor=4.0,
-            mini=False,
-            noextreme=False,
-        )
-        ep_evaluate(flags)
+        res = run_evalplus(args.eval_only, "humaneval")
+        result_file = os.path.join(os.path.dirname(args.eval_only), "../eval_results.json")
+        res["Average"] = 0
+        with open(result_file, "w") as f:
+            json.dump(res, f, indent=2)
+        print("=" * 50)
+        for k, v in res.items():
+            print(f"  {k:20s}: {v}")
         return
 
     # Base model paths for LoRA checkpoints
