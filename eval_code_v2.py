@@ -1,0 +1,171 @@
+"""
+Code generation evaluation: HumanEval(+) and MBPP(+).
+Generates code, saves to JSONL, runs evalplus.evaluate for reliable base+plus scoring.
+"""
+
+from __future__ import annotations
+import os, sys, json, re, argparse, io, logging
+from pathlib import Path
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
+
+CODE_PROMPT = (
+    "<｜begin▁of▁sentence｜>You are an AI programming assistant. "
+    "You only answer questions related to computer science.\n"
+    "### Instruction:\n{instruction}\n### Response:\n"
+)
+MISTRAL_PROMPT = "[INST] {instruction} [/INST]"
+OUR_PROMPT = "### Instruction:
+{instruction}
+
+### Response:
+"
+OUR_PROMPT = "### Instruction:
+{instruction}
+
+### Response:
+"
+
+
+def generate_code(model, tokenizer, prompt, max_tokens=512, temperature=0.0):
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    with torch.no_grad():
+        if temperature > 0:
+            out = model.generate(
+                **inputs, max_new_tokens=max_tokens, temperature=temperature,
+                do_sample=True, top_p=0.95, pad_token_id=tokenizer.eos_token_id,
+            )
+        else:
+            out = model.generate(
+                **inputs, max_new_tokens=max_tokens, temperature=0.0,
+                do_sample=False, pad_token_id=tokenizer.eos_token_id,
+            )
+    return tokenizer.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+
+
+def extract_code(text: str) -> str:
+    if '```' in text:
+        blocks = re.findall(r'```(?:python)?\s*(.*?)```', text, re.DOTALL)
+        return blocks[0].strip() if blocks else text.strip()
+    return text.strip()
+
+
+def generate_and_save(model, tokenizer, problems, prompt_template, jsonl_path,
+                      num_samples=1, temperature=0.0, desc="Generate"):
+    os.makedirs(os.path.dirname(jsonl_path) or ".", exist_ok=True)
+    with open(jsonl_path, "w") as f:
+        for task_id, p in tqdm(list(problems.items()), desc=desc):
+            prompt = prompt_template.format(instruction=p["prompt"])
+            for _ in range(num_samples):
+                raw = generate_code(model, tokenizer, prompt, temperature=temperature)
+                code = extract_code(raw)
+                f.write(json.dumps({"task_id": task_id, "completion": code}) + "\n")
+    return jsonl_path
+
+
+def run_evalplus(jsonl_path: str, dataset: str) -> dict:
+    """Run evalplus.evaluate and parse printed results."""
+    from evalplus.evaluate import evaluate
+    buf = io.StringIO()
+    with __import__('contextlib').redirect_stdout(buf):
+        evaluate(samples=jsonl_path, dataset=dataset, parallel=16)
+    text = buf.getvalue()
+    print(text)
+
+    # Parse all lines for pass@1 scores
+    # evalplus outputs benchmark name and score on SEPARATE lines
+    results = {}
+    prev_line = ''
+    for line in text.split('\n'):
+        line = line.strip()
+        m = re.search(r'pass@1:\s*([\d.]+)', line)
+        if m:
+            score = float(m.group(1)) * 100
+            pl = prev_line.lower()
+            if 'humaneval+' in pl:
+                results['HumanEval+'] = round(score, 1)
+            elif 'humaneval' in pl:
+                results['HumanEval'] = round(score, 1)
+            elif 'mbpp+' in pl:
+                results['MBPP+'] = round(score, 1)
+            elif 'mbpp' in pl:
+                results['MBPP'] = round(score, 1)
+        prev_line = line
+    return results
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_path", type=str, required=True)
+    parser.add_argument("--tasks", type=str, nargs="+", default=["humaneval"])
+    parser.add_argument("--model_type", type=str, default="deepseek", choices=["deepseek", "mistral"])
+    parser.add_argument("--use_8bit", action="store_true")
+    parser.add_argument("--num_samples", type=int, default=1,
+                        help="Number of samples per problem for pass@k")
+    parser.add_argument("--temperature", type=float, default=0.0,
+                        help="Temperature for sampling (0.0 = greedy)")
+    args = parser.parse_args()
+
+    load_kwargs = {"torch_dtype": torch.bfloat16}
+    if args.use_8bit:
+        from transformers import BitsAndBytesConfig
+        load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+    model = AutoModelForCausalLM.from_pretrained(args.model_path, **load_kwargs)
+    if not args.use_8bit:
+        model = model.cuda()
+    model.eval()
+
+    template = OUR_PROMPT if args.model_type == "mistral" else CODE_PROMPT
+    all_results = {}
+    tmp = Path(args.model_path) / "evalplus_temp"
+    tmp.mkdir(parents=True, exist_ok=True)
+
+    if "humaneval" in args.tasks:
+        from evalplus.data import get_human_eval_plus
+        problems = get_human_eval_plus()
+        path = str(tmp / "humaneval_samples.jsonl")
+        generate_and_save(model, tokenizer, problems, template, path,
+                          num_samples=args.num_samples, temperature=args.temperature,
+                          desc="HumanEval")
+        res = run_evalplus(path, "humaneval")
+        all_results.update(res)
+
+    if "mbpp" in args.tasks:
+        from evalplus.data import get_mbpp_plus
+        problems = get_mbpp_plus()
+        path = str(tmp / "mbpp_samples.jsonl")
+        generate_and_save(model, tokenizer, problems, template, path,
+                          num_samples=args.num_samples, temperature=args.temperature,
+                          desc="MBPP")
+        res = run_evalplus(path, "mbpp")
+        all_results.update(res)
+
+    # Summary
+    valid = [v for v in all_results.values() if v is not None]
+    avg = sum(valid) / len(valid) if valid else 0
+
+    print()
+    print("=" * 50)
+    print("  Code Generation Results")
+    print("=" * 50)
+    for k, v in all_results.items():
+        print(f"  {k:20s}: {v:.1f}")
+    print(f"  {'Average':20s}: {avg:.1f}")
+    print("=" * 50)
+
+    # Save
+    result_file = os.path.join(args.model_path, "eval_results.json")
+    all_results["Average"] = avg
+    with open(result_file, "w") as f:
+        json.dump(all_results, f, indent=2)
+    logger.info(f"Saved to {result_file}")
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    main()
