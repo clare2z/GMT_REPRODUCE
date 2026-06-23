@@ -8,6 +8,7 @@ import os, sys, json, re, argparse, io, logging
 from pathlib import Path
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
@@ -122,15 +123,31 @@ def main():
         ep_evaluate(flags)
         return
 
-    load_kwargs = {"torch_dtype": torch.bfloat16}
-    if args.use_8bit:
-        from transformers import BitsAndBytesConfig
-        load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+    # Base model paths for LoRA checkpoints
+    BASE_MISTRAL = "/root/autodl-tmp/hf_cache/hub/models--mistralai--Mistral-7B-v0.1/snapshots/27d67f1b5f57dc0953326b2601d68371d40ea8da"
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path)
-    model = AutoModelForCausalLM.from_pretrained(args.model_path, **load_kwargs)
-    if not args.use_8bit:
-        model = model.cuda()
+    # Detect LoRA adapter checkpoint
+    is_lora = os.path.exists(os.path.join(args.model_path, "adapter_config.json"))
+
+    if is_lora:
+        from peft import PeftModel
+        base_path = BASE_MISTRAL if os.path.exists(BASE_MISTRAL) else "mistralai/Mistral-7B-v0.1"
+        print(f"Loading LoRA adapter from {args.model_path} over base {base_path}")
+        base_model = AutoModelForCausalLM.from_pretrained(
+            base_path, torch_dtype=torch.bfloat16
+        ).cuda()
+        model = PeftModel.from_pretrained(base_model, args.model_path)
+        tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+    else:
+        load_kwargs = {"torch_dtype": torch.bfloat16}
+        if args.use_8bit:
+            from transformers import BitsAndBytesConfig
+            load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+        tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+        model = AutoModelForCausalLM.from_pretrained(args.model_path, **load_kwargs)
+        if not args.use_8bit:
+            model = model.cuda()
+
     model.eval()
 
     template = OUR_PROMPT
