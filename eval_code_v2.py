@@ -54,8 +54,14 @@ def generate_and_save(model, tokenizer, problems, prompt_template, jsonl_path,
 def run_evalplus(jsonl_path: str, dataset: str) -> dict:
     from evalplus.evaluate import evaluate
     buf = io.StringIO()
-    with __import__('contextlib').redirect_stdout(buf):
-        evaluate(samples=jsonl_path, dataset=dataset, parallel=16)
+    try:
+        with __import__('contextlib').redirect_stdout(buf):
+            evaluate(samples=jsonl_path, dataset=dataset, parallel=1)
+    except Exception as e:
+        print(f"[EvalPlus ERROR] {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        return {}
     text = buf.getvalue()
     print(text)
 
