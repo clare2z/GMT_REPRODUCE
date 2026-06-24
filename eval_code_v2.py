@@ -115,7 +115,6 @@ def main():
         print(f"Eval-only mode: dataset={args.eval_dataset} evaluating {args.eval_only}")
         res = run_evalplus(args.eval_only, args.eval_dataset)
         result_file = os.path.join(os.path.dirname(args.eval_only), "../eval_results.json")
-        res["Average"] = 0
         with open(result_file, "w") as f:
             json.dump(res, f, indent=2)
         print("=" * 50)
