@@ -58,11 +58,11 @@ def run_evalplus(jsonl_path: str, dataset: str) -> dict:
     buf_stderr = io.StringIO()
     try:
         with contextlib.redirect_stdout(buf_stdout), contextlib.redirect_stderr(buf_stderr):
-            ep_evaluate.evaluate(jsonl_path, dataset=dataset)
+            ep_evaluate(jsonl_path, dataset=dataset)
     except TypeError:
         with contextlib.redirect_stdout(buf_stdout), contextlib.redirect_stderr(buf_stderr):
             from types import SimpleNamespace
-            ep_evaluate.evaluate(SimpleNamespace(
+            ep_evaluate(SimpleNamespace(
                 dataset=dataset, samples=jsonl_path,
                 base_only=False, parallel=1,
                 i_just_wanna_run=False, test_details=False,
