@@ -106,11 +106,13 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--eval_only", type=str, default="",
                         help="跳过生成，直接评已有 jsonl 文件")
+    parser.add_argument("--eval_dataset", type=str, default="humaneval",
+                        help="eval_only 的 dataset 类型 (humaneval/mbpp)")
     args = parser.parse_args()
 
     if args.eval_only:
-        print(f"Eval-only mode: evaluating {args.eval_only}")
-        res = run_evalplus(args.eval_only, "humaneval")
+        print(f"Eval-only mode: dataset={args.eval_dataset} evaluating {args.eval_only}")
+        res = run_evalplus(args.eval_only, args.eval_dataset)
         result_file = os.path.join(os.path.dirname(args.eval_only), "../eval_results.json")
         res["Average"] = 0
         with open(result_file, "w") as f:
