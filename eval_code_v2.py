@@ -53,6 +53,7 @@ def generate_and_save(model, tokenizer, problems, prompt_template, jsonl_path,
 
 
 def run_evalplus(jsonl_path: str, dataset: str) -> dict:
+    from evalplus.evaluate import evaluate as ep_evaluate
     import contextlib
     buf_stdout = io.StringIO()
     buf_stderr = io.StringIO()
