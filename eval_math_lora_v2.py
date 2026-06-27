@@ -218,7 +218,7 @@ def evaluate_math(
     max_samples: int = None,
 ) -> Dict:
     """Evaluate on MATH dataset."""
-    dataset = load_dataset("competition_math", split="test")
+    dataset = load_dataset("hendrycks/competition_math", split="test")
     if max_samples:
         dataset = dataset.select(range(min(max_samples, len(dataset))))
 
