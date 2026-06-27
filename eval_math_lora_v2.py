@@ -11,6 +11,8 @@ Usage:
 from __future__ import annotations
 
 import os
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+
 import sys
 import json
 import re
