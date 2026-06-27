@@ -216,7 +216,7 @@ def evaluate_math(
     max_samples: int = None,
 ) -> Dict:
     """Evaluate on MATH dataset."""
-    dataset = load_dataset("/root/autodl-tmp/dataset/competition_math", split="test", trust_remote_code=True)
+    dataset = load_dataset("competition_math", split="test", trust_remote_code=True)
     if max_samples:
         dataset = dataset.select(range(min(max_samples, len(dataset))))
 
