@@ -28,12 +28,19 @@ from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
-MATH_PROMPT = """Below is an instruction that describes a task. Write a response that appropriately completes the request.
+MATH_PROMPT = """Below is a math problem. Solve it step by step.
 
-### Instruction:
+IMPORTANT:
+At the end of your solution, output ONLY the final answer in the format:
+
+\\boxed{answer}
+
+Do not output anything after that.
+
+### Problem:
 {instruction}
 
-### Response:
+### Solution:
 """
 
 GSM8K_PROMPT = """Question: {question}
