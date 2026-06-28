@@ -134,16 +134,27 @@ def _remove_latex_commands(s: str) -> str:
 
 
 def extract_math_answer(text: str) -> str:
-    """Extract answer from MATH dataset output with nested-brace-aware \\boxed{} parsing."""
+    """Extract answer from MATH dataset output."""
+    # 1. boxed first
     ans = _extract_boxed(text)
     if ans:
-        ans = _remove_latex_commands(ans)
-        ans = ans.replace("\\%", "%")
-        return ans.strip()
+        return _remove_latex_commands(ans).strip()
 
-    # Fallback: last line
-    lines = text.strip().split("\n")
-    return lines[-1].strip()
+    # 2. explicit final answer patterns
+    match = re.search(
+        r"(final answer|answer|result)\s*[:=]?\s*([-+]?\d*\.?\d+)",
+        text,
+        re.IGNORECASE
+    )
+    if match:
+        return match.group(2)
+
+    # 3. fallback: last number anywhere
+    numbers = re.findall(r"[-+]?\d*\.\d+|\d+", text)
+    if numbers:
+        return numbers[-1]
+
+    return ""
 
 
 def normalize_answer(ans: str) -> str:
