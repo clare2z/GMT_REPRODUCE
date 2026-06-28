@@ -141,7 +141,9 @@ def extract_math_answer(text: str) -> str:
 
 def normalize_answer(ans: str) -> str:
     """Normalize answer for comparison, preserving LaTeX mathematical structure."""
-    ans = ans.strip()
+    if ans is None:
+        return ""
+    ans = str(ans).strip()
 
     # Remove LaTeX formatting commands but keep their inner content
     ans = _remove_latex_commands(ans)
@@ -244,6 +246,8 @@ def evaluate_math(
 
         pred = extract_math_answer(response)
         true_ans = _extract_boxed(example["solution"]) if "\\boxed{" in example["solution"] else ""
+        if true_ans is None:
+            true_ans = ""
 
         if normalize_answer(pred) == normalize_answer(true_ans):
             correct += 1
