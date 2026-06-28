@@ -149,10 +149,12 @@ def extract_math_answer(text: str) -> str:
     if match:
         return match.group(2)
 
-    # 3. fallback: last number anywhere
-    numbers = re.findall(r"[-+]?\d*\.\d+|\d+", text)
-    if numbers:
-        return numbers[-1]
+    # 3. fallback: last standalone number line
+    lines = text.strip().split("\n")
+    for line in reversed(lines):
+        nums = re.findall(r"[-+]?\d*\.\d+|\d+", line)
+        if nums:
+            return nums[-1]
 
     return ""
 
