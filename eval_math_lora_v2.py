@@ -245,9 +245,7 @@ def evaluate_math(
         response = tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
 
         pred = extract_math_answer(response)
-        true_ans = example.get("answer", None)
-        if true_ans is None:
-            true_ans = _extract_boxed(example.get("solution", "")) or ""
+        true_ans = _extract_boxed(example.get("solution", ""))
         if true_ans is None:
             true_ans = ""
 
