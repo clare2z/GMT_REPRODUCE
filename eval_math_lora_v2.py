@@ -245,11 +245,13 @@ def evaluate_math(
         response = tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
 
         pred = extract_math_answer(response)
-        true_ans = _extract_boxed(example["solution"]) if "\\boxed{" in example["solution"] else ""
+        true_ans = example.get("answer", None)
+        if true_ans is None:
+            true_ans = _extract_boxed(example.get("solution", "")) or ""
         if true_ans is None:
             true_ans = ""
 
-        if normalize_answer(pred) == normalize_answer(true_ans):
+        if normalize_answer(pred) != "" and normalize_answer(true_ans) != "" and normalize_answer(pred) == normalize_answer(true_ans):
             correct += 1
         total += 1
 
