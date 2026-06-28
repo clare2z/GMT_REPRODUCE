@@ -140,38 +140,13 @@ def extract_math_answer(text: str) -> str:
 
 
 def normalize_answer(ans: str) -> str:
-    """Normalize answer for comparison, preserving LaTeX mathematical structure."""
     if ans is None:
         return ""
-    ans = str(ans).strip()
-
-    # Remove LaTeX formatting commands but keep their inner content
-    ans = _remove_latex_commands(ans)
-
-    # Normalize common LaTeX aliases
-    ans = ans.replace("\\%", "%")
-    ans = ans.replace("\\left", "")
-    ans = ans.replace("\\right", "")
-    ans = ans.replace("\\,", " ")
-    ans = ans.replace("\\;", " ")
-    ans = ans.replace("\\!", "")
-    ans = ans.replace("\\ ", " ")
-
-    # Remove backslash from simple commands that should be bare symbols
-    for sym in ["leq", "geq", "neq", "approx", "equiv", "pm", "times", "div",
-                "cdot", "ast", "star", "circ", "bullet", "sum", "prod", "int",
-                "infty", "alpha", "beta", "gamma", "delta", "epsilon", "pi"]:
-        ans = ans.replace("\\" + sym + " ", sym + " ")
-        if ans.endswith("\\" + sym):
-            ans = ans[:-len("\\" + sym)] + sym
-
-    # Normalize whitespace
-    ans = re.sub(r"\s+", " ", ans).strip()
-
-    # Lowercase for case-insensitive comparison
-    ans = ans.lower()
-
-    return ans
+    ans = str(ans).lower()
+    numbers = re.findall(r"[-+]?\d*\.\d+|\d+", ans)
+    if numbers:
+        return numbers[-1]
+    return ans.strip()
 
 
 def evaluate_gsm8k(
