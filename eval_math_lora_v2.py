@@ -33,7 +33,7 @@ MATH_PROMPT = """Below is a math problem. Solve it step by step.
 IMPORTANT:
 At the end of your solution, output ONLY the final answer in the format:
 
-\\boxed{answer}
+\\boxed{{{{answer}}}}
 
 Do not output anything after that.
 
