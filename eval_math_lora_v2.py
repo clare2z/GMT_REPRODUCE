@@ -244,7 +244,19 @@ def evaluate_math(
         if true_ans is None:
             true_ans = ""
 
-        if normalize_answer(pred) != "" and normalize_answer(true_ans) != "" and normalize_answer(pred) == normalize_answer(true_ans):
+        pred_norm = normalize_answer(pred)
+        true_norm = normalize_answer(true_ans)
+
+        if total < 5:
+            print("=" * 80)
+            print("Problem:", example["problem"][:200])
+            print("Ground Truth:", true_ans)
+            print("Normalized GT:", repr(true_norm))
+            print("Prediction:", pred)
+            print("Normalized Pred:", repr(pred_norm))
+            print("Raw Response:", response[:500])
+
+        if pred_norm != "" and true_norm != "" and pred_norm == true_norm:
             correct += 1
         total += 1
 
