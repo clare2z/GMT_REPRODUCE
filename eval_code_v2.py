@@ -33,10 +33,54 @@ def generate_code(model, tokenizer, prompt, max_tokens=512, temperature=0.0):
 
 
 def extract_code(text: str) -> str:
-    if '```' in text:
-        blocks = re.findall(r'```(?:python)?\s*(.*?)```', text, re.DOTALL)
-        return blocks[0].strip() if blocks else text.strip()
-    return text.strip()
+    # 1. Remove markdown code block markers
+    code = text.replace("```python", "").replace("```Python", "").replace("```", "").strip()
+
+    # 2. Extract content inside fenced code blocks if present (cleanest signal)
+    blocks = re.findall(r'```(?:python)?\s*\n?(.*?)```', text, re.DOTALL)
+    if blocks:
+        code = blocks[0].strip()
+
+    # 3. Find first code keyword — start from there (strip explanations)
+    for kw in ['from ', 'import ', 'def ', 'class ']:
+        idx = code.find('\n' + kw)
+        if idx == -1:
+            idx = code.find(kw) if code.startswith(kw) else -1
+        if idx >= 0:
+            code = code[idx:].strip()
+            if code.startswith('\n'):
+                code = code[1:].strip()
+            break
+
+    # 4. Strip trailing explanations / test cases / prompt leakage
+    stop_markers = [
+        '### Explanation:', '### Test Cases:', '### Prompt:', '### Response:',
+        'This function', 'The function', 'Please note', 'Conclusion:',
+        '### Note:', '### Example:', 'Now you can test',
+        'Let me explain', 'Here is', 'I hope this helps',
+    ]
+    for marker in stop_markers:
+        idx = code.find(marker)
+        if idx > 0 and '\n' in code[idx - 5:idx]:
+            code = code[:idx].strip()
+
+    # 5. Remove trailing natural language — keep only lines that look like code
+    lines = code.split('\n')
+    code_lines = []
+    for line in lines:
+        s = line.strip()
+        # Keep: blank, indented, or code keywords
+        if s == '' or line[0] in (' ', '\t') or s.startswith(('#', 'from ', 'import ', 'def ', 'class ', 'if ', 'for ', 'while ', 'return ', 'else:', 'elif ', 'except:', 'try:', 'with ', 'print(')):
+            code_lines.append(line)
+        # Found trailing NL text → stop
+        elif s and s[0].isupper() and not s.startswith(('True', 'False', 'None', 'A', 'I')):
+            if code_lines and len(s.split()) > 3:
+                break
+        else:
+            code_lines.append(line)
+    code = '\n'.join(code_lines).rstrip()
+
+    return code.strip()
 
 
 def generate_and_save(model, tokenizer, problems, prompt_template, jsonl_path,
