@@ -279,8 +279,35 @@ class RMTTrainer:
         return total_loss / count if count > 0 else 0.0
 
 
+def _estimate_global_threshold(named_params, keep_ratio, max_samples=5_000_000):
+    """随机采样估计全局梯度top-k阈值，避免OOM"""
+    active = [(name, p) for name, p in named_params if p.requires_grad and p.grad is not None]
+    total_elements = sum(p.grad.numel() for _, p in active)
+    if total_elements == 0:
+        return None
+    sample_ratio = min(1.0, max_samples / total_elements)
+    samples = []
+    for _, p in active:
+        grad_abs = p.grad.detach().abs().flatten()
+        if sample_ratio < 1.0:
+            n_sample = max(100, int(grad_abs.numel() * sample_ratio))
+            n_sample = min(n_sample, grad_abs.numel())
+            idx = torch.randint(0, grad_abs.numel(), (n_sample,), device=grad_abs.device)
+            sampled = grad_abs[idx]
+        else:
+            sampled = grad_abs
+        samples.append(sampled.float())
+    sampled_values = torch.cat(samples)
+    mask_ratio = 1.0 - keep_ratio
+    kth = max(1, int(sampled_values.numel() * mask_ratio))
+    kth = min(kth, sampled_values.numel())
+    threshold = torch.kthvalue(sampled_values, kth).values.item()
+    del sampled_values, samples
+    return threshold
+
+
 class GMTTrainer:
-    """梯度掩码训练 — 每步全局 top-k 幅度阈值"""
+    """梯度掩码训练 — 每步全局 top-k 幅度阈值（采样估计避免OOM）"""
     def __init__(self, model, k_percent=80, accumulation_steps=1, device="cuda", lr=2e-5,
                  weight_decay=0.0, grad_accum=1, warmup_ratio=0.03, total_steps=5000,
                  lr_scheduler_type="cosine"):
@@ -301,32 +328,22 @@ class GMTTrainer:
             self.optimizer.zero_grad()
             outputs.loss.backward()
 
-            # GMT mask: keep top keep% trainable gradients by magnitude
             if self.keep < 1.0:
-                trainable_grads = [p.grad.detach().abs().flatten() for p in self.model.parameters()
-                                   if p.requires_grad and p.grad is not None]
-                all_flat = torch.cat(trainable_grads)
-                num_keep = max(1, int(all_flat.numel() * self.keep))
-                thr = float(torch.topk(all_flat, num_keep, largest=True).values.min().item())
-
-                kept_elems, total_elems, n_masked = 0, 0, 0
-                for param in self.model.parameters():
-                    if param.requires_grad and param.grad is not None:
-                        mask = param.grad.abs() >= thr
-                        param.grad = param.grad * mask.float()
-                        kept_elems += mask.sum().item()
-                        total_elems += mask.numel()
-                        n_masked += 1
+                named_params = list(self.model.named_parameters())
+                thr = _estimate_global_threshold(named_params, keep_ratio=self.keep, max_samples=5_000_000)
+                if thr is not None:
+                    for _, param in named_params:
+                        if param.grad is not None:
+                            mask = param.grad.detach().abs() >= thr
+                            param.grad.mul_(mask.to(dtype=param.grad.dtype, device=param.grad.device))
 
             self.optimizer.step()
             total_loss += outputs.loss.item()
             count += 1
 
-            if self.keep < 1.0 and count == 1:
-                logger.info(f"  [GMT] masking {n_masked} trainable params | actual_keep_global={kept_elems/max(total_elems,1):.4f} target={self.keep:.4f}")
-            if count % 50 == 0 and self.keep < 1.0:
-                actual_keep_global = kept_elems / max(total_elems, 1)
-                logger.info(f"  [GMT] step {count} | actual_keep_global={actual_keep_global:.4f} (target={self.keep:.4f})")
+            if count % 500 == 0 and self.keep < 1.0:
+                ke = float(sum((p.grad != 0).float().mean().item() for _, p in self.model.named_parameters() if p.requires_grad and p.grad is not None) / max(1, sum(1 for _, p in self.model.named_parameters() if p.requires_grad and p.grad is not None)))
+                logger.info(f"  [GMT] step {count} | actual_keep~{ke:.3f} target={self.keep:.3f}")
 
         return total_loss / count if count > 0 else 0.0
 
