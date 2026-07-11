@@ -95,15 +95,29 @@ class DGMMFramework:
 
     # ═══ 创新一: 三个分析维度 ═══════════════════════════
 
-    def _direction(self, grad: torch.Tensor):
-        """1. 方向分析: pos/neg/zero 梯度符号分布"""
-        return (grad > 0).float().mean(), (grad < 0).float().mean(), (grad == 0).float().mean()
+    def _direction(self, grads: list):
+        """1. 方向分析: pos/neg/zero 梯度符号分布 (流式计算，不拼接)"""
+        total_elems = 0
+        pos_count = 0
+        neg_count = 0
+        for g in grads:
+            gf = g.detach().float()
+            total_elems += gf.numel()
+            pos_count += (gf > 0).sum().item()
+            neg_count += (gf < 0).sum().item()
+        if total_elems == 0:
+            return 0.0, 0.0, 0.0
+        return pos_count / total_elems, neg_count / total_elems, (total_elems - pos_count - neg_count) / total_elems
 
-    def _stability(self, name: str, grad: torch.Tensor) -> float:
-        """2. 稳定性: grad.norm() 历史波动 (0=稳定, 1=波动)"""
+    def _stability(self, name: str, grads: list) -> float:
+        """2. 稳定性: grad.norm() 历史波动 (流式计算)"""
         if name not in self.absmean_history:
             self.absmean_history[name] = []
-        norm_val = float(grad.detach().float().norm().item())
+        # streaming norm²
+        norm_sq = 0.0
+        for g in grads:
+            norm_sq += float(g.detach().float().norm().item()) ** 2
+        norm_val = norm_sq ** 0.5
         h = self.absmean_history[name]
         h.append(norm_val)
         if len(h) > 20:
@@ -123,16 +137,16 @@ class DGMMFramework:
 
     # ═══ 层分组 ═════════════════════════════════════════
 
-    def _group_layers(self, grads: Dict[str, torch.Tensor], skip_names: Set[str]) -> Dict[str, torch.Tensor]:
+    def _group_layers(self, grads: Dict[str, torch.Tensor], skip_names: Set[str]) -> Dict[str, list]:
+        """返回 Dict[layer_name → List[flattened_tensor]]，不拼接避免OOM"""
         groups = {}
         for name, grad in grads.items():
             if name in skip_names:
                 continue
-            g = grad.detach().float().flatten()
             m = re.search(r'layers\.(\d+)', name)
             key = f"L{int(m.group(1)):02d}" if m else name.rsplit('.', 1)[0]
-            groups.setdefault(key, []).append(g)
-        return {k: torch.cat(v) for k, v in groups.items()}
+            groups.setdefault(key, []).append(grad)
+        return groups
 
     # ═══ 核心 ═══════════════════════════════════════════
 
@@ -149,12 +163,12 @@ class DGMMFramework:
         if n < 2:
             return self._fallback_gmt(accumulated_grads, skip_names, layer_grads)
 
-        # ── 每层 pos/neg/zero + stability ───────────
+        # ── 每层 pos/neg/zero + stability (流式计算) ──
         raw_features: Dict[str, torch.Tensor] = {}
         for name in names:
-            g = layer_grads[name]
-            pos, neg, zero = self._direction(g)
-            stab = 1.0 - self._stability(name, g)  # 高=稳定
+            grads = layer_grads[name]  # list of tensors
+            pos, neg, zero = self._direction(grads)
+            stab = 1.0 - self._stability(name, grads)  # 高=稳定
             raw_features[name] = torch.tensor([pos, neg, zero, stab])
 
         # ── 全局层间相关 ─────────────────────────────
@@ -254,7 +268,9 @@ class DGMMFramework:
     def _fallback_gmt(self, grads, skip_names, layer_grads):
         if not layer_grads:
             return grads, self._empty_info()
-        g_abs = list(layer_grads.values())[0].abs()
+        # layer_grads is now Dict[str, List[tensor]]
+        first_list = list(layer_grads.values())[0]
+        g_abs = torch.cat([g.detach().float().abs().flatten() for g in first_list]) if len(first_list) > 1 else first_list[0].detach().float().abs().flatten()
         thr = float(torch.kthvalue(g_abs, max(1, int(g_abs.numel() * 0.2))).values.item())
         masked = {}
         for name, grad in grads.items():
