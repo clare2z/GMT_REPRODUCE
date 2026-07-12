@@ -552,6 +552,8 @@ def main():
                         help="weight decay (论文 0)")
     parser.add_argument("--bf16", action="store_true", default=False,
                         help="使用 bf16 训练")
+    parser.add_argument("--skip_save", action="store_true", default=False,
+                        help="跳过保存checkpoint（sanity用）")
     parser.add_argument("--no_shuffle", action="store_true", default=False,
                         help="不 shuffle，取前 N 条（复现旧结果用）")
     args = parser.parse_args()
@@ -614,9 +616,12 @@ def main():
             break
 
     # 4. 保存 checkpoint
-    logger.info(f">>> [4/4] Saving checkpoint to {args.output_dir}...")
-    model.save_pretrained(args.output_dir)
-    tokenizer.save_pretrained(args.output_dir)
+    if args.skip_save:
+        logger.info(">>> [4/4] Skipped saving (--skip_save)")
+    else:
+        logger.info(f">>> [4/4] Saving checkpoint to {args.output_dir}...")
+        model.save_pretrained(args.output_dir)
+        tokenizer.save_pretrained(args.output_dir)
 
     config = {
         "algorithm": args.algorithm, "model_name": args.model_name,
