@@ -357,73 +357,75 @@ class DGMMTrainer:
         self.device = device
         params = [p for p in model.parameters() if p.requires_grad]
         self.optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
+        num_updates = max(1, math.ceil(total_steps / grad_accum))
+        num_warmup = max(1, int(num_updates * warmup_ratio))
+        if warmup_ratio <= 0 or lr_scheduler_type == "constant":
+            from torch.optim.lr_scheduler import LambdaLR
+            self.scheduler = LambdaLR(self.optimizer, lambda step: 1.0)
+        else:
+            from transformers import get_cosine_schedule_with_warmup
+            self.scheduler = get_cosine_schedule_with_warmup(
+                self.optimizer, num_warmup_steps=num_warmup, num_training_steps=num_updates)
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from DGMM import DGMMFramework
         self.dgmm = DGMMFramework(device=device, **(dgmm_config or {}))
         self.best_loss = float('inf')
-        self.cached_keeps: Dict[str, float] = {}  # 缓存 keep ratios
 
     def train_epoch(self, dataloader):
         self.model.train()
-        total_loss, count = 0.0, 0
+        total_loss, micro_step, update_step = 0.0, 0, 0
         total_batches = len(dataloader)
         t_start = time.time()
 
+        self.optimizer.zero_grad()
         for batch in dataloader:
             inputs = {"input_ids": batch["input_ids"].to(self.device), "attention_mask": batch["attention_mask"].to(self.device)}
             labels = batch['labels'].to(self.device)
             outputs = self.model(**inputs, labels=labels)
 
             if torch.isnan(outputs.loss) or torch.isinf(outputs.loss):
-                logger.error(f"NaN/Inf loss at step {count}")
+                logger.error(f"NaN/Inf loss at micro_step {micro_step}")
                 return float('nan')
 
-            self.optimizer.zero_grad()
-            torch.cuda.synchronize()
-            t_fwd = time.time()
-            outputs.loss.backward()
-            torch.cuda.synchronize()
-            t_bwd = time.time()
-
-            accumulated_grads = {}
-            for name, param in self.model.named_parameters():
-                if param.grad is not None:
-                    accumulated_grads[name] = param.grad.clone().detach()
-            torch.cuda.synchronize()
-            t_clone = time.time()
-
-            dgmm_info = None
-            if accumulated_grads:
-                # 每 1 步更新统计, 后续可放宽到每 10 步
-                masked_grads, dgmm_info = self.dgmm.apply_mask(accumulated_grads)
-                for name, param in self.model.named_parameters():
-                    if name in masked_grads:
-                        param.grad = masked_grads[name]
-                del accumulated_grads, masked_grads
-            torch.cuda.synchronize()
-            t_dgmm = time.time()
-
-            self.optimizer.step()
-            torch.cuda.synchronize()
-            t_opt = time.time()
-
+            loss = outputs.loss / self.grad_accum
+            loss.backward()
             total_loss += outputs.loss.item()
-            count += 1
+            micro_step += 1
 
-            if count % 10 == 0 or count == 1:
-                elapsed = time.time() - t_start
-                eta = (elapsed / count) * (total_batches - count)
-                imp_str = ""
-                if dgmm_info:
-                    imp_str = (f" imp={dgmm_info.get('avg_importance', 0):.3f}"
-                               f" mk={dgmm_info.get('mask_keep_mean', 0):.3f}"
-                               f" tgt=[{dgmm_info.get('target_keep_min', 0):.2f},{dgmm_info.get('target_keep_max', 0):.2f}]")
-                self.best_loss = min(self.best_loss, outputs.loss.item())
-                status = "✅" if outputs.loss.item() <= self.best_loss else "  "
-                logger.info(f"  {status} {count}/{total_batches} | loss={outputs.loss.item():.4f} | eta={eta:.0f}s"
-                            f" | TIMING bwd={t_bwd-t_fwd:.1f}s clone={t_clone-t_bwd:.1f}s dgmm={t_dgmm-t_clone:.1f}s opt={t_opt-t_dgmm:.1f}s{imp_str}")
+            should_update = (micro_step % self.grad_accum == 0) or (micro_step == total_batches)
 
-        return total_loss / count if count > 0 else 0.0
+            if should_update:
+                accumulated_grads = {
+                    name: param.grad.detach().clone()
+                    for name, param in self.model.named_parameters()
+                    if param.grad is not None
+                }
+
+                dgmm_info = None
+                if accumulated_grads:
+                    masked_grads, dgmm_info = self.dgmm.apply_mask(accumulated_grads)
+                    for name, param in self.model.named_parameters():
+                        if name in masked_grads:
+                            param.grad.copy_(masked_grads[name].to(dtype=param.grad.dtype, device=param.grad.device))
+                    del accumulated_grads, masked_grads
+
+                self.optimizer.step()
+                self.scheduler.step()
+                self.optimizer.zero_grad()
+                update_step += 1
+
+                if update_step % 10 == 0 or update_step == 1:
+                    elapsed = time.time() - t_start
+                    eta = (elapsed / micro_step) * (total_batches - micro_step)
+                    imp_str = ""
+                    if dgmm_info:
+                        imp_str = (f" imp={dgmm_info.get('avg_importance', 0):.3f}"
+                                   f" mk={dgmm_info.get('mask_keep_mean', 0):.3f}"
+                                   f" tgt=[{dgmm_info.get('target_keep_min', 0):.2f},{dgmm_info.get('target_keep_max', 0):.2f}]")
+                    logger.info(f"  {update_step}/{total_batches//self.grad_accum} | loss={outputs.loss.item():.4f} "
+                                f"| eta={eta:.0f}s | micro={micro_step}{imp_str}")
+
+        return total_loss / micro_step if micro_step > 0 else 0.0
 
 
 # ═══════════════════════════════════════════════════════════════
