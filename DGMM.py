@@ -62,7 +62,8 @@ class DGMMFramework:
                  mask_floor=0.2, meta_lr=1e-5,
                  ablate: str = "",
                  soft_alpha: float = 0.0,
-                 late_start: int = 0):
+                 late_start: int = 0,
+                 keep_update_interval: int = 1):
         self.ema_alpha = ema_alpha
         self.warmup_steps = warmup_steps
         self.encoder_output_dim = encoder_output_dim
@@ -70,6 +71,8 @@ class DGMMFramework:
         self.ablate = set(ablate.split(",")) if ablate else set()
         self.soft_alpha = soft_alpha
         self.late_start = late_start
+        self.keep_update_interval = keep_update_interval
+        self._last_keeps: Dict[str, float] = {}  # 缓存上次 keep ratio
 
         # 历史追踪
         self.grad_ema: Dict[str, torch.Tensor] = {}
@@ -163,47 +166,61 @@ class DGMMFramework:
         if n < 2:
             return self._fallback_gmt(accumulated_grads, skip_names, layer_grads)
 
-        # ── 每层 pos/neg/zero + stability (流式计算) ──
-        raw_features: Dict[str, torch.Tensor] = {}
-        for name in names:
-            grads = layer_grads[name]  # list of tensors
-            pos, neg, zero = self._direction(grads)
-            stab = 1.0 - self._stability(name, grads)  # 高=稳定
-            raw_features[name] = torch.tensor([pos, neg, zero, stab])
+        # ── 每 N 步更新统计, 否则复用缓存 ──
+        do_update = (self.step_count % self.keep_update_interval == 0)
 
-        # ── 全局层间相关 ─────────────────────────────
-        feat_stack = torch.stack([raw_features[n] for n in names])
-        corr = self._correlation(feat_stack)
+        if do_update:
+            raw_features: Dict[str, torch.Tensor] = {}
+            for name in names:
+                grads = layer_grads[name]
+                pos, neg, zero = self._direction(grads)
+                stab = 1.0 - self._stability(name, grads)
+                raw_features[name] = torch.tensor([pos, neg, zero, stab])
 
-        # ── quality → keep_pct ───────────────────────
-        for name in names:
-            f = raw_features[name]
-            d = 0.5 if "direction" in self.ablate else (f[0].item() - f[1].item())  # pos - neg
-            v = 0.5 if "volatility" in self.ablate else f[3].item()  # stability
-            y = 0.0 if "synergy" in self.ablate else corr
-            quality = float((+3.0 * d + 2.0 * v + 2.0 * y))
-            keep = 0.89 + quality * 0.10
-            keep = max(0.0, min(1.0, keep))
-            if name in self.layer_keep:
-                self.layer_keep[name] = self.ema_alpha * self.layer_keep[name] + (1 - self.ema_alpha) * keep
+            feat_stack = torch.stack([raw_features[n] for n in names])
+            corr = self._correlation(feat_stack)
+
+            for name in names:
+                f = raw_features[name]
+                d = 0.5 if "direction" in self.ablate else (f[0].item() - f[1].item())
+                v = 0.5 if "volatility" in self.ablate else f[3].item()
+                y = 0.0 if "synergy" in self.ablate else corr
+                quality = float((+3.0 * d + 2.0 * v + 2.0 * y))
+                keep = 0.89 + quality * 0.10
+                keep = max(0.0, min(1.0, keep))
+                if name in self.layer_keep:
+                    self.layer_keep[name] = self.ema_alpha * self.layer_keep[name] + (1 - self.ema_alpha) * keep
+                else:
+                    self.layer_keep[name] = keep
+
+            # 阶段 clamp
+            if self.step_count < 500:
+                lo, hi = 0.99, 1.00
+            elif self.step_count < 1000:
+                lo, hi = 0.98, 1.00
             else:
-                self.layer_keep[name] = keep
-
-        # ── 阶段 clamp ───────────────────────────────
-        if self.step_count < 500:
-            lo, hi = 0.99, 1.00
-        elif self.step_count < 1000:
-            lo, hi = 0.98, 1.00
-        else:
-            lo, hi = 0.97, 1.00
-        for name in names:
-            self.layer_keep[name] = max(lo, min(hi, self.layer_keep[name]))
+                lo, hi = 0.97, 1.00
+            for name in names:
+                self.layer_keep[name] = max(lo, min(hi, self.layer_keep[name]))
+            self._last_keeps = dict(self.layer_keep)  # 缓存
 
         # ── 应用: parameter-level threshold ──────────
         self.step_count += 1
         masked_grads = {}
         target_keeps = []
         mask_keeps = []
+
+        # 预先计算每层的全局阈值（用层内所有参数拼接的 top k 值）
+        layer_thresholds: Dict[str, float] = {}
+        for name in names:
+            grads = layer_grads[name]  # list of tensors
+            kp = self.layer_keep.get(name, 0.89)
+            if kp >= 1.0:
+                continue
+            # 只用第一个 tensor 的统计估计阈值（比 kthvalue 快）
+            g0_abs = grads[0].detach().float().abs().flatten()
+            cut_idx = max(1, int(g0_abs.numel() * (1.0 - kp)))
+            layer_thresholds[name] = float(torch.kthvalue(g0_abs, cut_idx).values.item())
 
         for name, grad in accumulated_grads.items():
             if name in skip_names:
@@ -215,10 +232,8 @@ class DGMMFramework:
             m = re.search(r'layers\.(\d+)', name)
             key = f"L{int(m.group(1)):02d}" if m else name.rsplit('.', 1)[0]
             kp = self.layer_keep.get(key, 0.89)
+            thr = layer_thresholds.get(key, 0.0)
 
-            g_abs = grad.detach().float().abs()
-            cut_idx = max(1, int(g_abs.numel() * (1.0 - kp)))
-            thr = float(torch.kthvalue(g_abs.flatten(), cut_idx).values.item())
             mask = grad.abs() >= thr
             mask_actual = float(mask.float().mean().item())
 

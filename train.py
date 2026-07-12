@@ -361,6 +361,7 @@ class DGMMTrainer:
         from DGMM import DGMMFramework
         self.dgmm = DGMMFramework(device=device, **(dgmm_config or {}))
         self.best_loss = float('inf')
+        self.cached_keeps: Dict[str, float] = {}  # 缓存 keep ratios
 
     def train_epoch(self, dataloader):
         self.model.train()
@@ -378,23 +379,34 @@ class DGMMTrainer:
                 return float('nan')
 
             self.optimizer.zero_grad()
+            torch.cuda.synchronize()
+            t_fwd = time.time()
             outputs.loss.backward()
+            torch.cuda.synchronize()
+            t_bwd = time.time()
 
             accumulated_grads = {}
             for name, param in self.model.named_parameters():
                 if param.grad is not None:
                     accumulated_grads[name] = param.grad.clone().detach()
+            torch.cuda.synchronize()
+            t_clone = time.time()
 
             dgmm_info = None
             if accumulated_grads:
+                # 每 1 步更新统计, 后续可放宽到每 10 步
                 masked_grads, dgmm_info = self.dgmm.apply_mask(accumulated_grads)
                 for name, param in self.model.named_parameters():
                     if name in masked_grads:
                         param.grad = masked_grads[name]
                 del accumulated_grads, masked_grads
+            torch.cuda.synchronize()
+            t_dgmm = time.time()
 
             self.optimizer.step()
-            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            t_opt = time.time()
+
             total_loss += outputs.loss.item()
             count += 1
 
@@ -405,12 +417,11 @@ class DGMMTrainer:
                 if dgmm_info:
                     imp_str = (f" imp={dgmm_info.get('avg_importance', 0):.3f}"
                                f" mk={dgmm_info.get('mask_keep_mean', 0):.3f}"
-                               f" tgt=[{dgmm_info.get('target_keep_min', 0):.2f},{dgmm_info.get('target_keep_max', 0):.2f}]"
-                               f" lo={dgmm_info.get('lowest_layers', '?')}"
-                               f" hi={dgmm_info.get('highest_layers', '?')}")
+                               f" tgt=[{dgmm_info.get('target_keep_min', 0):.2f},{dgmm_info.get('target_keep_max', 0):.2f}]")
                 self.best_loss = min(self.best_loss, outputs.loss.item())
                 status = "✅" if outputs.loss.item() <= self.best_loss else "  "
-                logger.info(f"  {status} {count}/{total_batches} | loss={outputs.loss.item():.4f} | eta={eta:.0f}s{imp_str}")
+                logger.info(f"  {status} {count}/{total_batches} | loss={outputs.loss.item():.4f} | eta={eta:.0f}s"
+                            f" | TIMING bwd={t_bwd-t_fwd:.1f}s clone={t_clone-t_bwd:.1f}s dgmm={t_dgmm-t_clone:.1f}s opt={t_opt-t_dgmm:.1f}s{imp_str}")
 
         return total_loss / count if count > 0 else 0.0
 
