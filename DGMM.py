@@ -204,16 +204,27 @@ class DGMMFramework:
                 else:
                     self.layer_keep[name] = keep
 
-            # 阶段 clamp
-            if self.step_count < 500:
+            # 阶段 clamp — warmup 已保护，clamp 留空间让 keep 分化
+            if self.step_count <= self.warmup_steps:
                 lo, hi = 0.99, 1.00
+            elif self.step_count < 500:
+                lo, hi = 0.90, 0.99
             elif self.step_count < 1000:
-                lo, hi = 0.98, 1.00
+                lo, hi = 0.85, 0.99
             else:
-                lo, hi = 0.97, 1.00
+                lo, hi = 0.80, 0.99
             for name in names:
                 self.layer_keep[name] = max(lo, min(hi, self.layer_keep[name]))
-            self._last_keeps = dict(self.layer_keep)  # 缓存
+            self._last_keeps = dict(self.layer_keep)
+
+            # debug: 打印 keep 值
+            kvals = list(self.layer_keep.values())
+            rkvals = [self.layer_keep.get(n, 0.89) for n in names if n not in (set() if not hasattr(self,'_raw_before_clamp') else set())]
+            import logging as _lg
+            _lg.getLogger(__name__).info(
+                f"DGMM_UPDATE step={self.step_count} layers={len(kvals)} "
+                f"keep_min={min(kvals):.6f} keep_max={max(kvals):.6f} keep_mean={sum(kvals)/len(kvals):.6f} "
+                f"clamp=[{lo:.2f},{hi:.2f}]")
 
         # ── 应用: parameter-level threshold ──────────
         self.step_count += 1
