@@ -172,6 +172,7 @@ class DGMMFramework:
 
         tg_stats = time.time()
 
+        corr = 0.0
         # ── 每 N 步更新统计, 否则复用缓存 ──
         do_update = (self.step_count % self.keep_update_interval == 0)
 
@@ -284,7 +285,7 @@ class DGMMFramework:
         n_show = min(3, len(sorted_layers))
         lowest = [(l[0], f"{l[1]:.3f}") for l in sorted_layers[:n_show]]
         highest = [(l[0], f"{l[1]:.3f}") for l in sorted_layers[-n_show:]]
-        avg_synergy = float(corr)
+        avg_synergy = float(corr.item()) if torch.is_tensor(corr) else float(corr)
 
         info = {
             'avg_importance': float(np.mean(target_keeps)),
