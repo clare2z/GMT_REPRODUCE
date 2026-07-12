@@ -157,14 +157,20 @@ class DGMMFramework:
         if os.environ.get("DGMM_DISABLED") == "1":
             return accumulated_grads, self._empty_info()
 
+        import time
+        t0 = time.time()
+
         # ── 分类 ────────────────────────────────────
         skip_names = {name for name, g in accumulated_grads.items() if self._should_skip(name, g)}
         layer_grads = self._group_layers(accumulated_grads, skip_names)
         names = sorted(layer_grads.keys())
         n = len(names)
+        t_group = time.time()
 
         if n < 2:
             return self._fallback_gmt(accumulated_grads, skip_names, layer_grads)
+
+        tg_stats = time.time()
 
         # ── 每 N 步更新统计, 否则复用缓存 ──
         do_update = (self.step_count % self.keep_update_interval == 0)
@@ -217,10 +223,16 @@ class DGMMFramework:
             kp = self.layer_keep.get(name, 0.89)
             if kp >= 1.0:
                 continue
-            # 只用第一个 tensor 的统计估计阈值（比 kthvalue 快）
+            # 随机采样 ≤100K 元素估计阈值
             g0_abs = grads[0].detach().float().abs().flatten()
-            cut_idx = max(1, int(g0_abs.numel() * (1.0 - kp)))
-            layer_thresholds[name] = float(torch.kthvalue(g0_abs, cut_idx).values.item())
+            n_sample = min(100000, g0_abs.numel())
+            if n_sample < g0_abs.numel():
+                idx = torch.randint(0, g0_abs.numel(), (n_sample,), device=g0_abs.device)
+                sampled = g0_abs[idx]
+            else:
+                sampled = g0_abs
+            cut_idx = max(1, int(sampled.numel() * (1.0 - kp)))
+            layer_thresholds[name] = float(torch.kthvalue(sampled, cut_idx).values.item())
 
         for name, grad in accumulated_grads.items():
             if name in skip_names:
@@ -256,6 +268,15 @@ class DGMMFramework:
                 mask_keeps.append(mask_actual * ramp + (1 - ramp))
                 target_keeps.append(kp)
 
+
+        t_mask = time.time()
+
+        if self.step_count % 10 == 0:
+            import logging
+            logging.getLogger(__name__).info(
+                f"DGMM_TIMING group={t_group-t0:.2f}s stats={tg_stats-t_group:.2f}s "
+                f"threshold+mask={t_mask-tg_stats:.2f}s "
+                f"total={t_mask-t0:.2f}s do_update={do_update}")
 
         # ── 日志 ─────────────────────────────────────
         # 从 self.layer_keep 去重获取每层 keep（layer-level 非 parameter-level）

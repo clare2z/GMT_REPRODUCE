@@ -484,6 +484,7 @@ def create_trainer(algorithm, model, args, device, total_steps=5000):
             "ablate": args.dgmm_ablate,
             "soft_alpha": args.dgmm_soft_alpha,
             "late_start": args.dgmm_late_start,
+            "keep_update_interval": args.dgmm_keep_interval,
         }
 
     return trainer_cls(**kwargs)
@@ -521,6 +522,8 @@ def main():
                         help="DGMM: soft scaling alpha (0=hard zero, 0.5=缩到50%)")
     parser.add_argument("--dgmm_late_start", type=int, default=0,
                         help="DGMM: 延迟到 N 步后启动 mask (0=立即)")
+    parser.add_argument("--dgmm_keep_interval", type=int, default=20,
+                        help="DGMM: 每 N 步更新 layer statistics (默认 20)")
     parser.add_argument("--dgmm_ablate", type=str, default="",
                         help="消融: direction,volatility,synergy (逗号分隔)")
     parser.add_argument("--dgmm_encoder_dim", type=int, default=256,
