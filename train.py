@@ -355,6 +355,7 @@ class DGMMTrainer:
                  lr_scheduler_type="cosine"):
         self.model = model
         self.device = device
+        self.grad_accum = grad_accum
         params = [p for p in model.parameters() if p.requires_grad]
         self.optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
         num_updates = max(1, math.ceil(total_steps / grad_accum))
