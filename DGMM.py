@@ -175,6 +175,10 @@ class DGMMFramework:
         corr = 0.0
         # ── 每 N 步更新统计, 否则复用缓存 ──
         do_update = (self.step_count % self.keep_update_interval == 0)
+        if self.step_count <= 25:
+            import logging
+            logging.getLogger(__name__).info(
+                f"DEBUG_DGMM step={self.step_count} interval={self.keep_update_interval} do_update={do_update}")
 
         if do_update:
             raw_features: Dict[str, torch.Tensor] = {}
