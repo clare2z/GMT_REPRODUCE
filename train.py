@@ -26,6 +26,7 @@ import csv
 import time
 import json
 import math
+import shutil
 import argparse
 from datetime import datetime
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
@@ -184,8 +185,9 @@ class SFTTrainer:
                 self.optimizer.zero_grad()
                 update_count += 1
             if torch.isnan(outputs.loss) or torch.isinf(outputs.loss):
-                return float('nan')
-        return total_loss / count if count > 0 else 0.0
+                return (float('nan'), count)
+        opt = math.ceil(count / self.grad_accum)
+        return (total_loss / count, opt) if count > 0 else (0.0, 0)
 
 
 class DropTrainer:
@@ -213,7 +215,7 @@ class DropTrainer:
             self.optimizer.step()
             total_loss += outputs.loss.item()
             count += 1
-        return total_loss / count if count > 0 else 0.0
+        return (total_loss / count, count) if count > 0 else (0.0, 0)
 
 
 class HFTTrainer:
@@ -245,7 +247,7 @@ class HFTTrainer:
             self.optimizer.step()
             total_loss += outputs.loss.item()
             count += 1
-        return total_loss / count if count > 0 else 0.0
+        return (total_loss / count, count) if count > 0 else (0.0, 0)
 
 
 class RMTTrainer:
@@ -276,7 +278,7 @@ class RMTTrainer:
             self.optimizer.step()
             total_loss += outputs.loss.item()
             count += 1
-        return total_loss / count if count > 0 else 0.0
+        return (total_loss / count, count) if count > 0 else (0.0, 0)
 
 
 def _estimate_global_threshold(named_params, keep_ratio, max_samples=5_000_000):
@@ -345,7 +347,7 @@ class GMTTrainer:
                 ke = float(sum((p.grad != 0).float().mean().item() for _, p in self.model.named_parameters() if p.requires_grad and p.grad is not None) / max(1, sum(1 for _, p in self.model.named_parameters() if p.requires_grad and p.grad is not None)))
                 logger.info(f"  [GMT] step {count} | actual_keep~{ke:.3f} target={self.keep:.3f}")
 
-        return total_loss / count if count > 0 else 0.0
+        return (total_loss / count, count) if count > 0 else (0.0, 0)
 
 
 class DGMMTrainer:
@@ -426,7 +428,7 @@ class DGMMTrainer:
                     logger.info(f"  {update_step}/{total_batches//self.grad_accum} | loss={outputs.loss.item():.4f} "
                                 f"| eta={eta:.0f}s | micro={micro_step}{imp_str}")
 
-        return total_loss / micro_step if micro_step > 0 else 0.0
+        return (total_loss / micro_step, update_step) if micro_step > 0 else (0.0, 0)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -556,6 +558,8 @@ def main():
                         help="跳过保存checkpoint（sanity用）")
     parser.add_argument("--save_steps", type=int, default=0,
                         help="中间checkpoint保存间隔步数（0=不保存）")
+    parser.add_argument("--save_total_limit", type=int, default=0,
+                        help="最多保留的中间checkpoint数量（0=不删除旧checkpoint）")
     parser.add_argument("--no_shuffle", action="store_true", default=False,
                         help="不 shuffle，取前 N 条（复现旧结果用）")
     args = parser.parse_args()
@@ -610,27 +614,45 @@ def main():
     for epoch in range(args.epochs):
         t_start = time.time()
         logger.info(f">>> [3/4] Epoch {epoch+1}/{args.epochs} starting...")
-        loss = trainer.train_epoch(dataloader)
+        result = trainer.train_epoch(dataloader)
+        if isinstance(result, tuple):
+            loss, opt_steps = result
+        else:
+            loss, opt_steps = result, len(dataloader)
         elapsed = time.time() - t_start
-        global_step += len(dataloader)
-        logger.info(f">>> [3/4] Epoch {epoch+1}/{args.epochs} done | loss={loss:.4f} | time={elapsed:.0f}s | global_step={global_step}")
+        global_step += opt_steps
+        logger.info(f">>> [3/4] Epoch {epoch+1}/{args.epochs} done | loss={loss:.4f} | time={elapsed:.0f}s | opt_steps={opt_steps} global={global_step}")
         log_rows.append({"epoch": epoch + 1, "loss": loss, "time_s": elapsed})
 
-        # 中间 checkpoint 保存
-        if args.save_steps > 0 and global_step % args.save_steps < len(dataloader) and not args.skip_save:
-            ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-            os.makedirs(ckpt_dir, exist_ok=True)
-            logger.info(f">>> Saving intermediate checkpoint to {ckpt_dir}")
-            model.save_pretrained(ckpt_dir)
-            tokenizer.save_pretrained(ckpt_dir)
-            state = {
-                "algorithm": args.algorithm, "global_step": global_step,
-                "epoch": epoch + 1, "avg_loss": loss,
-                "lr": args.lr, "batch_size": args.batch_size, "max_length": args.max_length,
-                "timestamp": datetime.now().isoformat(),
-            }
-            with open(os.path.join(ckpt_dir, "train_state.json"), "w") as f:
-                json.dump(state, f, indent=2)
+        # 中间 checkpoint 保存 (基于 optimizer step)
+        if args.save_steps > 0 and not args.skip_save:
+            # 找出本 epoch 内需要保存的 step
+            prev = global_step - opt_steps
+            next_ckpt = ((prev // args.save_steps) + 1) * args.save_steps
+            while next_ckpt <= global_step:
+                ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{next_ckpt}")
+                os.makedirs(ckpt_dir, exist_ok=True)
+                logger.info(f">>> Saving intermediate checkpoint to {ckpt_dir}")
+                model.save_pretrained(ckpt_dir)
+                tokenizer.save_pretrained(ckpt_dir)
+                state = {
+                    "algorithm": args.algorithm, "model_name": args.model_name,
+                    "global_step": next_ckpt, "epoch": epoch + 1, "current_loss": loss,
+                    "learning_rate": args.lr, "save_steps": args.save_steps,
+                    "lora": args.lora, "lora_r": args.lora_r, "lora_alpha": args.lora_alpha,
+                    "dgmm_config": getattr(trainer, 'dgmm_config', {}),
+                    "timestamp": datetime.now().isoformat(),
+                }
+                with open(os.path.join(ckpt_dir, "train_state.json"), "w") as f:
+                    json.dump(state, f, indent=2)
+                # 删除旧 checkpoint
+                if args.save_total_limit > 0:
+                    all_ckpts = sorted([d for d in os.listdir(args.output_dir) if d.startswith("checkpoint-")])
+                    while len(all_ckpts) > args.save_total_limit:
+                        old = os.path.join(args.output_dir, all_ckpts.pop(0))
+                        shutil.rmtree(old, ignore_errors=True)
+                        logger.info(f">>> Removed old checkpoint: {old}")
+                next_ckpt += args.save_steps
 
         if loss != loss:
             logger.error("Training diverged! Aborting.")
