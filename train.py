@@ -554,6 +554,8 @@ def main():
                         help="使用 bf16 训练")
     parser.add_argument("--skip_save", action="store_true", default=False,
                         help="跳过保存checkpoint（sanity用）")
+    parser.add_argument("--save_steps", type=int, default=0,
+                        help="中间checkpoint保存间隔步数（0=不保存）")
     parser.add_argument("--no_shuffle", action="store_true", default=False,
                         help="不 shuffle，取前 N 条（复现旧结果用）")
     args = parser.parse_args()
@@ -603,15 +605,34 @@ def main():
     trainer = create_trainer(args.algorithm, model, args, device, total_steps=len(dataloader) * args.epochs)
     os.makedirs(args.output_dir, exist_ok=True)
     log_rows = []
+    global_step = 0
 
     for epoch in range(args.epochs):
         t_start = time.time()
         logger.info(f">>> [3/4] Epoch {epoch+1}/{args.epochs} starting...")
         loss = trainer.train_epoch(dataloader)
         elapsed = time.time() - t_start
-        logger.info(f">>> [3/4] Epoch {epoch+1}/{args.epochs} done | loss={loss:.4f} | time={elapsed:.0f}s")
+        global_step += len(dataloader)
+        logger.info(f">>> [3/4] Epoch {epoch+1}/{args.epochs} done | loss={loss:.4f} | time={elapsed:.0f}s | global_step={global_step}")
         log_rows.append({"epoch": epoch + 1, "loss": loss, "time_s": elapsed})
-        if loss != loss:  # NaN check
+
+        # 中间 checkpoint 保存
+        if args.save_steps > 0 and global_step % args.save_steps < len(dataloader) and not args.skip_save:
+            ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+            os.makedirs(ckpt_dir, exist_ok=True)
+            logger.info(f">>> Saving intermediate checkpoint to {ckpt_dir}")
+            model.save_pretrained(ckpt_dir)
+            tokenizer.save_pretrained(ckpt_dir)
+            state = {
+                "algorithm": args.algorithm, "global_step": global_step,
+                "epoch": epoch + 1, "avg_loss": loss,
+                "lr": args.lr, "batch_size": args.batch_size, "max_length": args.max_length,
+                "timestamp": datetime.now().isoformat(),
+            }
+            with open(os.path.join(ckpt_dir, "train_state.json"), "w") as f:
+                json.dump(state, f, indent=2)
+
+        if loss != loss:
             logger.error("Training diverged! Aborting.")
             break
 
