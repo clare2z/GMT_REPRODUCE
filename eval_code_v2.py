@@ -165,38 +165,39 @@ def main():
     is_lora = os.path.exists(os.path.join(args.model_path, "adapter_config.json"))
 
     if is_lora:
-        # 从 adapter_config 或 train_config 读取正确的 base model
+        from peft import PeftModel
+        import json
+
         adapter_cfg_path = os.path.join(args.model_path, "adapter_config.json")
         with open(adapter_cfg_path, "r") as f:
             adapter_cfg = json.load(f)
-        base_path = adapter_cfg.get("base_model_name_or_path")
 
-        LOCAL_PATHS = {
-            "mistralai/Mistral-7B-v0.1": "/root/autodl-tmp/model/Mistral-7B-v0.1",
-            "deepseek-ai/DeepSeek-Coder-Base-6.7B": "/root/autodl-tmp/model/deepseek-coder-6.7b-base",
+        base_name = adapter_cfg.get("base_model_name_or_path", "")
+
+        local_paths = {
+            "deepseek-ai/DeepSeek-Coder-Base-6.7B":
+                "/root/autodl-tmp/model/deepseek-coder-6.7b-base",
+            "mistralai/Mistral-7B-v0.1":
+                "/root/autodl-tmp/hf_cache/hub/models--mistralai--Mistral-7B-v0.1/snapshots/27d67f1b5f57dc0953326b2601d68371d40ea8da",
         }
 
-        # 回退到 train_config.json
-        if not base_path or (not os.path.exists(base_path) and "/" in str(base_path)):
-            train_cfg_path = os.path.join(args.model_path, "train_config.json")
-            if not os.path.exists(train_cfg_path):
-                parent_cfg = os.path.join(os.path.dirname(args.model_path.rstrip("/")), "train_config.json")
-                if os.path.exists(parent_cfg):
-                    train_cfg_path = parent_cfg
-            if os.path.exists(train_cfg_path):
-                with open(train_cfg_path, "r") as f:
-                    train_cfg = json.load(f)
-                model_name = train_cfg.get("model_name", "")
-                base_path = LOCAL_PATHS.get(model_name, model_name)
+        base_path = local_paths.get(base_name, base_name)
 
-        if not base_path:
-            raise ValueError(f"Cannot determine base model for LoRA checkpoint: {args.model_path}")
+        if not base_path or not os.path.exists(base_path):
+            raise ValueError(
+                f"Cannot resolve base model for adapter. "
+                f"adapter says: {base_name}, resolved: {base_path}"
+            )
 
         print(f"Loading LoRA adapter from {args.model_path} over base {base_path}")
+
         tokenizer = AutoTokenizer.from_pretrained(args.model_path)
         base_model = AutoModelForCausalLM.from_pretrained(
-            base_path, torch_dtype=torch.bfloat16, trust_remote_code=True
+            base_path,
+            torch_dtype=torch.bfloat16,
+            trust_remote_code=True,
         ).cuda()
+
         model = PeftModel.from_pretrained(base_model, args.model_path)
     else:
         load_kwargs = {"torch_dtype": torch.bfloat16}
