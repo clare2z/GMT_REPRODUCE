@@ -48,6 +48,7 @@ def set_seed(seed=42):
 LOCAL_PATHS = {
     "mistralai/Mistral-7B-v0.1": "/root/autodl-tmp/model/Mistral-7B-v0.1",
     "deepseek-ai/DeepSeek-Coder-Base-6.7B": "/root/autodl-tmp/model/deepseek-coder-6.7b-base",
+    "LLM-Research/llama-2-7b": "/root/autodl-tmp/model/Llama-2-7b",
     "dataset": "/root/autodl-tmp/dataset/Magicoder-Evol-Instruct-110K"
 }
 
