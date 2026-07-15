@@ -273,15 +273,39 @@ def main():
     parser.add_argument("--use_8bit", action="store_true")
     args = parser.parse_args()
 
-    BASE_MISTRAL = "/root/autodl-tmp/hf_cache/hub/models--mistralai--Mistral-7B-v0.1/snapshots/27d67f1b5f57dc0953326b2601d68371d40ea8da"
-
     is_lora = os.path.exists(os.path.join(args.model_path, "adapter_config.json"))
     if is_lora:
         from peft import PeftModel
-        base_path = BASE_MISTRAL if os.path.exists(BASE_MISTRAL) else "mistralai/Mistral-7B-v0.1"
-        base_model = AutoModelForCausalLM.from_pretrained(base_path, torch_dtype=torch.bfloat16).cuda()
-        model = PeftModel.from_pretrained(base_model, args.model_path)
+        import json
+
+        adapter_cfg_path = os.path.join(args.model_path, "adapter_config.json")
+        with open(adapter_cfg_path, "r") as f:
+            adapter_cfg = json.load(f)
+
+        base_name = adapter_cfg.get("base_model_name_or_path", "")
+
+        local_paths = {
+            "deepseek-ai/DeepSeek-Coder-Base-6.7B":
+                "/root/autodl-tmp/model/deepseek-coder-6.7b-base",
+            "mistralai/Mistral-7B-v0.1":
+                "/root/autodl-tmp/hf_cache/hub/models--mistralai--Mistral-7B-v0.1/snapshots/27d67f1b5f57dc0953326b2601d68371d40ea8da",
+        }
+
+        base_path = local_paths.get(base_name, base_name)
+
+        if not base_path or not os.path.exists(base_path):
+            raise ValueError(
+                f"Cannot resolve base model for adapter. "
+                f"adapter says: {base_name}, resolved: {base_path}"
+            )
+
+        print(f"Loading LoRA adapter from {args.model_path} over base {base_path}")
+
         tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+        base_model = AutoModelForCausalLM.from_pretrained(
+            base_path, torch_dtype=torch.bfloat16, trust_remote_code=True
+        ).cuda()
+        model = PeftModel.from_pretrained(base_model, args.model_path)
     else:
         load_kwargs = {"torch_dtype": torch.bfloat16}
         if args.use_8bit:
