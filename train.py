@@ -211,7 +211,7 @@ class SFTTrainer:
                 self.scheduler.step()
                 self.optimizer.zero_grad()
                 update_count += 1
-                if save_fn: save_fn()
+                if save_fn: save_fn(outputs.loss.item())
             if torch.isnan(outputs.loss) or torch.isinf(outputs.loss):
                 return (float('nan'), count)
         opt = math.ceil(count / self.grad_accum)
@@ -446,7 +446,7 @@ class DGMMTrainer:
                 self.optimizer.step()
                 self.scheduler.step()
                 self.optimizer.zero_grad()
-                if save_fn: save_fn()
+                if save_fn: save_fn(outputs.loss.item())
                 update_step += 1
 
                 if update_step % 10 == 0 or update_step == 1:
@@ -648,12 +648,12 @@ def main():
         logger.info(f">>> [3/4] Epoch {epoch+1}/{args.epochs} starting...")
         # 闭包：每次 optimizer.step() 后立即保存
         _save_step = [0]  # mutable counter
-        def _save_fn():
+        def _save_fn(loss_val=0.0):
             _save_step[0] += 1
             s = _save_step[0]
-            if args.save_steps > 0 and s % args.save_steps == 0:
-                _save_checkpoint_safe(model, tokenizer, args.output_dir, s, args, 0.0, epoch + 1)
-        result = trainer.train_epoch(dataloader, save_fn=_save_fn if (args.save_steps > 0 and not args.skip_save) else None)
+            if s % args.save_steps == 0:
+                _save_checkpoint_safe(model, tokenizer, args.output_dir, s, args, loss_val, epoch + 1)
+        result = trainer.train_epoch(dataloader, save_fn=_save_fn if args.save_steps > 0 else None)
         if isinstance(result, tuple):
             loss, opt_steps = result
         else:
