@@ -45,6 +45,32 @@ def set_seed(seed=42):
     torch.cuda.manual_seed_all(seed)
 
 
+def _save_checkpoint_safe(model, tokenizer, output_dir, global_step, args, loss, epoch):
+    """在 optimizer.step() 后立即保存中间 checkpoint"""
+    ckpt_dir = os.path.join(output_dir, f"checkpoint-{global_step}")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    model.save_pretrained(ckpt_dir)
+    tokenizer.save_pretrained(ckpt_dir)
+    state = {
+        "algorithm": args.algorithm, "model_name": args.model_name,
+        "global_step": global_step, "epoch": epoch, "current_loss": loss,
+        "learning_rate": args.lr, "save_steps": args.save_steps,
+        "lora": args.lora, "lora_r": args.lora_r, "lora_alpha": args.lora_alpha,
+        "ddgmm_config": getattr(args, 'dgmm_ablate', ''),
+        "timestamp": datetime.now().isoformat(),
+    }
+    with open(os.path.join(ckpt_dir, "train_state.json"), "w") as f:
+        json.dump(state, f, indent=2)
+    logger.info(f">>> Saved intermediate checkpoint: {ckpt_dir}")
+    # 删除旧 checkpoint
+    if args.save_total_limit > 0:
+        all_dirs = sorted([d for d in os.listdir(output_dir) if d.startswith("checkpoint-")])
+        while len(all_dirs) > args.save_total_limit:
+            old = os.path.join(output_dir, all_dirs.pop(0))
+            shutil.rmtree(old, ignore_errors=True)
+            logger.info(f">>> Removed old checkpoint: {old}")
+
+
 LOCAL_PATHS = {
     "mistralai/Mistral-7B-v0.1": "/root/autodl-tmp/model/Mistral-7B-v0.1",
     "deepseek-ai/DeepSeek-Coder-Base-6.7B": "/root/autodl-tmp/model/deepseek-coder-6.7b-base",
@@ -169,7 +195,7 @@ class SFTTrainer:
                 self.optimizer, num_warmup_steps=num_warmup, num_training_steps=num_updates)
             logger.info(f"  [SFT] cosine scheduler: warmup={num_warmup}/{num_updates}")
 
-    def train_epoch(self, dataloader):
+    def train_epoch(self, dataloader, save_fn=None):
         self.model.train()
         total_loss, count, update_count = 0.0, 0, 0
         for batch in dataloader:
@@ -185,6 +211,7 @@ class SFTTrainer:
                 self.scheduler.step()
                 self.optimizer.zero_grad()
                 update_count += 1
+                if save_fn: save_fn()
             if torch.isnan(outputs.loss) or torch.isinf(outputs.loss):
                 return (float('nan'), count)
         opt = math.ceil(count / self.grad_accum)
@@ -202,7 +229,7 @@ class DropTrainer:
         params = [p for p in model.parameters() if p.requires_grad]
         self.optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
 
-    def train_epoch(self, dataloader):
+    def train_epoch(self, dataloader, save_fn=None):
         self.model.train()
         total_loss, count = 0.0, 0
         for batch in dataloader:
@@ -214,6 +241,7 @@ class DropTrainer:
                 if param.grad is not None:
                     param.grad = param.grad * (torch.rand_like(param.grad) > self.drop_rate)
             self.optimizer.step()
+            if save_fn: save_fn()
             total_loss += outputs.loss.item()
             count += 1
         return (total_loss / count, count) if count > 0 else (0.0, 0)
@@ -237,7 +265,7 @@ class HFTTrainer:
         self.optimizer = torch.optim.AdamW(
             [p for p in model.parameters() if p.requires_grad], lr=lr, weight_decay=weight_decay)
 
-    def train_epoch(self, dataloader):
+    def train_epoch(self, dataloader, save_fn=None):
         self.model.train()
         total_loss, count = 0.0, 0
         for batch in dataloader:
@@ -246,6 +274,7 @@ class HFTTrainer:
             self.optimizer.zero_grad()
             outputs.loss.backward()
             self.optimizer.step()
+            if save_fn: save_fn()
             total_loss += outputs.loss.item()
             count += 1
         return (total_loss / count, count) if count > 0 else (0.0, 0)
@@ -262,7 +291,7 @@ class RMTTrainer:
         params = [p for p in model.parameters() if p.requires_grad]
         self.optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
 
-    def train_epoch(self, dataloader):
+    def train_epoch(self, dataloader, save_fn=None):
         self.model.train()
         total_loss, count = 0.0, 0
         for batch in dataloader:
@@ -277,6 +306,7 @@ class RMTTrainer:
                     param.grad = param.grad * mask.float()
 
             self.optimizer.step()
+            if save_fn: save_fn()
             total_loss += outputs.loss.item()
             count += 1
         return (total_loss / count, count) if count > 0 else (0.0, 0)
@@ -321,7 +351,7 @@ class GMTTrainer:
         self.optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
         self.keep = k_percent / 100.0
 
-    def train_epoch(self, dataloader):
+    def train_epoch(self, dataloader, save_fn=None):
         self.model.train()
         total_loss, count = 0.0, 0
 
@@ -375,7 +405,7 @@ class DGMMTrainer:
         self.dgmm = DGMMFramework(device=device, **(dgmm_config or {}))
         self.best_loss = float('inf')
 
-    def train_epoch(self, dataloader):
+    def train_epoch(self, dataloader, save_fn=None):
         self.model.train()
         total_loss, micro_step, update_step = 0.0, 0, 0
         total_batches = len(dataloader)
@@ -416,6 +446,7 @@ class DGMMTrainer:
                 self.optimizer.step()
                 self.scheduler.step()
                 self.optimizer.zero_grad()
+                if save_fn: save_fn()
                 update_step += 1
 
                 if update_step % 10 == 0 or update_step == 1:
@@ -615,7 +646,14 @@ def main():
     for epoch in range(args.epochs):
         t_start = time.time()
         logger.info(f">>> [3/4] Epoch {epoch+1}/{args.epochs} starting...")
-        result = trainer.train_epoch(dataloader)
+        # 闭包：每次 optimizer.step() 后立即保存
+        _save_step = [0]  # mutable counter
+        def _save_fn():
+            _save_step[0] += 1
+            s = _save_step[0]
+            if args.save_steps > 0 and s % args.save_steps == 0:
+                _save_checkpoint_safe(model, tokenizer, args.output_dir, s, args, 0.0, epoch + 1)
+        result = trainer.train_epoch(dataloader, save_fn=_save_fn if (args.save_steps > 0 and not args.skip_save) else None)
         if isinstance(result, tuple):
             loss, opt_steps = result
         else:
@@ -624,36 +662,6 @@ def main():
         global_step += opt_steps
         logger.info(f">>> [3/4] Epoch {epoch+1}/{args.epochs} done | loss={loss:.4f} | time={elapsed:.0f}s | opt_steps={opt_steps} global={global_step}")
         log_rows.append({"epoch": epoch + 1, "loss": loss, "time_s": elapsed})
-
-        # 中间 checkpoint 保存 (基于 optimizer step)
-        if args.save_steps > 0 and not args.skip_save:
-            # 找出本 epoch 内需要保存的 step
-            prev = global_step - opt_steps
-            next_ckpt = ((prev // args.save_steps) + 1) * args.save_steps
-            while next_ckpt <= global_step:
-                ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{next_ckpt}")
-                os.makedirs(ckpt_dir, exist_ok=True)
-                logger.info(f">>> Saving intermediate checkpoint to {ckpt_dir}")
-                model.save_pretrained(ckpt_dir)
-                tokenizer.save_pretrained(ckpt_dir)
-                state = {
-                    "algorithm": args.algorithm, "model_name": args.model_name,
-                    "global_step": next_ckpt, "epoch": epoch + 1, "current_loss": loss,
-                    "learning_rate": args.lr, "save_steps": args.save_steps,
-                    "lora": args.lora, "lora_r": args.lora_r, "lora_alpha": args.lora_alpha,
-                    "dgmm_config": getattr(trainer, 'dgmm_config', {}),
-                    "timestamp": datetime.now().isoformat(),
-                }
-                with open(os.path.join(ckpt_dir, "train_state.json"), "w") as f:
-                    json.dump(state, f, indent=2)
-                # 删除旧 checkpoint
-                if args.save_total_limit > 0:
-                    all_ckpts = sorted([d for d in os.listdir(args.output_dir) if d.startswith("checkpoint-")])
-                    while len(all_ckpts) > args.save_total_limit:
-                        old = os.path.join(args.output_dir, all_ckpts.pop(0))
-                        shutil.rmtree(old, ignore_errors=True)
-                        logger.info(f">>> Removed old checkpoint: {old}")
-                next_ckpt += args.save_steps
 
         if loss != loss:
             logger.error("Training diverged! Aborting.")
