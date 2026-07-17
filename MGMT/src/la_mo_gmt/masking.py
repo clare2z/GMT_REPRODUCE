@@ -16,6 +16,25 @@ import torch.nn as nn
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
+# DGMM — module-level singleton
+_dgmm_instance = None
+
+
+def _get_dgmm(alpha=1.0, warmup_steps=500, keep_update_interval=1):
+    """Create or reuse DGMMFramework instance"""
+    global _dgmm_instance
+    if _dgmm_instance is None:
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+        from dgmm import DGMMFramework
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        _dgmm_instance = DGMMFramework(
+            warmup_steps=warmup_steps,
+            keep_update_interval=keep_update_interval,
+            device=device,
+        )
+    return _dgmm_instance
+
 
 def get_layer_groups(
     model: nn.Module,
@@ -126,6 +145,18 @@ def apply_gradient_mask(
     Returns:
         Stats dict with per-layer mask ratios for logging.
     """
+    if method == "dgmm":
+        _dgmm = _get_dgmm(alpha=alpha, warmup_steps=warmup_steps)
+        grads_dict = {name: p.grad.detach().clone() for name, p in named_params if p.grad is not None and p.requires_grad}
+        if grads_dict:
+            masked, info = _dgmm.apply_mask(grads_dict)
+            with torch.no_grad():
+                for name, p in named_params:
+                    if name in masked:
+                        p.grad.copy_(masked[name].to(dtype=p.grad.dtype, device=p.grad.device))
+            return {f"dgmm_{k}": v for k, v in info.items()}
+        return {"dgmm": 0.0}
+
     if method == "none" or global_ratio <= 0.0:
         return {"global_ratio": 0.0}
 
