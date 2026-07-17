@@ -1,0 +1,51 @@
+# ──────────────────────────────────────
+# General Domain — DPO Training Config
+# Dataset: UltraFeedback
+# Models: LLaMA2-7B, LLaMA2-13B (SFT-initialized)
+# ──────────────────────────────────────
+
+model_name_or_path: "/path/to/models/sft_llama2_7b"       # SFT checkpoint
+data_path: "/path/to/datasets/ultrafeedback.jsonl"
+output_dir: "./outputs/dpo_llama2_7b_la_mo_gmt"
+
+model:
+  use_flash_attention: true
+  torch_dtype: "bfloat16"
+  load_in_8bit: false
+  load_in_4bit: false
+
+mask:
+  method: "la_mo_gmt"
+  global_ratio: 0.3
+  alpha: 3.0
+  beta1: 0.9
+  min_ratio: 0.05
+  max_ratio: 0.95
+  warmup_steps: 200
+
+# DPO-specific
+dpo:
+  beta: 0.1                       # DPO temperature
+  reference_model_path: "/path/to/models/sft_llama2_7b"   # Same as model for standard DPO
+
+training:
+  num_epochs: 1
+  per_device_batch_size: 2
+  gradient_accumulation_steps: 16
+  learning_rate: 5.0e-7           # Lower LR for DPO
+  lr_scheduler: "cosine"
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  max_seq_length: 2048
+  max_prompt_length: 512
+  logging_steps: 10
+  save_steps: 500
+  eval_steps: 500
+  bf16: true
+  gradient_checkpointing: true
+  optim: "adamw_8bit"
+  dataloader_num_workers: 4
+
+wandb:
+  project: "la-mo-gmt"
+  run_name: "dpo_llama2_7b_la_mo_gmt"

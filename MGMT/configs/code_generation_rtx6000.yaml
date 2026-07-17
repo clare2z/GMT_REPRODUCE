@@ -1,0 +1,55 @@
+# ──────────────────────────────────────
+# Code Generation — SFT Training Config
+# GPU: RTX PRO 6000 (Blackwell, 96GB)
+# Dataset: Magicoder-Evol-Instruct-110K
+# Model: DeepSeek-Coder-6.7B-Base
+# ──────────────────────────────────────
+
+# Paths (MODIFY THESE)
+model_name_or_path: "/your/path/to/deepseek-coder-6.7b-base"
+data_path: "/your/path/to/Magicoder-Evol-Instruct-110K/data-evol_instruct-decontaminated.jsonl"
+output_dir: "./outputs/code_deepseek"
+
+# Model
+model:
+  use_flash_attention: false
+  torch_dtype: "bfloat16"
+  load_in_8bit: false
+  load_in_4bit: false
+
+# Masking method: 'none', 'gmt', 'mo_gmt', 'la_gmt', 'la_mo_gmt', 'rmt'
+mask:
+  method: "la_mo_gmt"
+  global_ratio: 0.3
+  alpha: 3.0
+  beta1: 0.9
+  min_ratio: 0.05
+  max_ratio: 0.95
+  warmup_steps: 200
+
+# Training — RTX PRO 6000 optimized
+training:
+  num_epochs: 3
+  per_device_batch_size: 8         # 96GB 显存充裕, 翻倍
+  gradient_accumulation_steps: 4   # 有效 batch = 8 * 4 = 32
+  learning_rate: 2.0e-5
+  lr_scheduler: "cosine"
+  warmup_ratio: 0.03
+  weight_decay: 0.01
+  max_seq_length: 2048
+  logging_steps: 10
+  save_steps: 500
+  eval_steps: 500
+  bf16: true
+  gradient_checkpointing: true
+  optim: "adamw_torch"             # FP32 Adam, Blackwell 避免 bnb 兼容问题
+  dataloader_num_workers: 4
+
+# Data
+data:
+  prompt_template: "code"
+
+# WandB logging
+wandb:
+  project: "la-mo-gmt"
+  run_name: "code_deepseek"

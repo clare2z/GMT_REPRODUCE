@@ -1,0 +1,48 @@
+# ──────────────────────────────────────
+# Math Reasoning — SFT Training Config
+# Dataset: MetaMathQA
+# Models: Mistral-7B, LLaMA3-8B
+# ──────────────────────────────────────
+
+model_name_or_path: "/root/autodl-tmp/model/Mistral-7B-v0___1"
+data_path: "/root/autodl-tmp/dataset/MetaMathQA/MetaMathQA-395K.json"
+output_dir: "/root/autodl-tmp/MGMT/outputs/math_mistral_la_mo_gmt"
+
+model:
+  use_flash_attention: false
+  torch_dtype: "bfloat16"
+  load_in_8bit: false
+  load_in_4bit: false
+
+mask:
+  method: "la_mo_gmt"
+  global_ratio: 0.3
+  alpha: 3.0
+  beta1: 0.9
+  min_ratio: 0.05
+  max_ratio: 0.95
+  warmup_steps: 200
+
+training:
+  num_epochs: 3
+  per_device_batch_size: 4
+  gradient_accumulation_steps: 8
+  learning_rate: 2.0e-5
+  lr_scheduler: "cosine"
+  warmup_ratio: 0.03
+  weight_decay: 0.01
+  max_seq_length: 2048
+  logging_steps: 10
+  save_steps: 500
+  eval_steps: 500
+  bf16: true
+  gradient_checkpointing: true
+  optim: "adamw_8bit"
+  dataloader_num_workers: 4
+
+data:
+  prompt_template: "math"
+
+wandb:
+  project: "la-mo-gmt"
+  run_name: "math_mistral_la_mo_gmt"

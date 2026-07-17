@@ -1,0 +1,54 @@
+# ──────────────────────────────────────
+# Code Generation — SFT Training Config
+# Dataset: Magicoder-Evol-Instruct-110K
+# Models: Mistral-7B, DeepSeek-Coder-Base-6.7B
+# ──────────────────────────────────────
+
+# Paths (MODIFY THESE)
+model_name_or_path: "/root/autodl-tmp/model/deepseek-coder-6.7b-base"
+data_path: "/root/autodl-tmp/dataset/Magicoder-Evol-Instruct-110K/data-evol_instruct-decontaminated.jsonl"
+output_dir: "/root/autodl-tmp/MGMT/outputs/code_deepseek_la_mo_gmt"
+
+# Model
+model:
+  use_flash_attention: false
+  torch_dtype: "bfloat16"
+  load_in_8bit: false              # Use 8-bit for memory savings on 80GB
+  load_in_4bit: false
+
+# Masking method: 'none', 'gmt', 'mo_gmt', 'la_gmt', 'la_mo_gmt', 'rmt'
+mask:
+  method: "la_mo_gmt"
+  global_ratio: 0.3                # Mask 30% of gradients (update 70%)
+  alpha: 1.0                       # Layer-adaptive concentration (higher = more variation)
+  beta1: 0.9                       # EMA decay for momentum
+  min_ratio: 0.05
+  max_ratio: 0.95
+  warmup_steps: 200                # Steps to accumulate EMA before masking
+
+# Training
+training:
+  num_epochs: 2
+  per_device_batch_size: 4         # Adjust based on GPU memory
+  gradient_accumulation_steps: 8   # Effective batch = 4 * 8 = 32
+  learning_rate: 2.0e-5
+  lr_scheduler: "cosine"
+  warmup_ratio: 0.03
+  weight_decay: 0.01
+  max_seq_length: 2048
+  logging_steps: 10
+  save_steps: 500
+  eval_steps: 500
+  bf16: true
+  gradient_checkpointing: true
+  optim: "adamw_8bit"              # 8-bit Adam for memory efficiency
+  dataloader_num_workers: 4
+
+# Data
+data:
+  prompt_template: "code"
+
+# WandB logging
+wandb:
+  project: "la-mo-gmt"
+  run_name: "code_deepseek_la_mo_gmt"

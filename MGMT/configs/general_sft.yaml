@@ -1,0 +1,48 @@
+# ──────────────────────────────────────
+# General Domain — SFT Training Config
+# Dataset: Tulu V2
+# Models: LLaMA2-7B, LLaMA2-13B
+# ──────────────────────────────────────
+
+model_name_or_path: "/root/autodl-tmp/model/llama-7b"
+data_path: "/root/autodl-tmp/dataset/tulu-v2-sft-mixture/data/*.parquet"
+output_dir: "/root/autodl-tmp/MGMT/outputs/general_llama2_7b_la_mo_gmt"
+
+model:
+  use_flash_attention: false
+  torch_dtype: "bfloat16"
+  load_in_8bit: false
+  load_in_4bit: false
+
+mask:
+  method: "la_mo_gmt"
+  global_ratio: 0.3
+  alpha: 3.0
+  beta1: 0.9
+  min_ratio: 0.05
+  max_ratio: 0.95
+  warmup_steps: 200
+
+training:
+  num_epochs: 3
+  per_device_batch_size: 2         # 7B on 80GB, conservative
+  gradient_accumulation_steps: 16
+  learning_rate: 2.0e-5
+  lr_scheduler: "cosine"
+  warmup_ratio: 0.03
+  weight_decay: 0.01
+  max_seq_length: 2048
+  logging_steps: 10
+  save_steps: 500
+  eval_steps: 500
+  bf16: true
+  gradient_checkpointing: true
+  optim: "adamw_8bit"
+  dataloader_num_workers: 4
+
+data:
+  prompt_template: "tulu"
+
+wandb:
+  project: "la-mo-gmt"
+  run_name: "general_llama2_7b_la_mo_gmt"
