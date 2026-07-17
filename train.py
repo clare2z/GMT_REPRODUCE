@@ -142,62 +142,61 @@ def load_tulu_dataset():
     logger.info("Loading Tulu V2 SFT Mixture dataset...")
     tulu_path = LOCAL_PATHS.get("tulu", "")
     if os.path.exists(tulu_path):
-        dataset = load_dataset(tulu_path, split="train")
+        from datasets import load_from_disk
+        dataset = load_from_disk(tulu_path)
+        if isinstance(dataset, dict):
+            dataset = dataset.get("train", list(dataset.values())[0])
     else:
-        logger.info(f"Local path not found: {tulu_path}, downloading from Hugging Face...")
+        logger.info(f"Local path not found: {tulu_path}, fallback HF...")
         dataset = load_dataset("allenai/tulu-v2-sft-mixture", split="train")
     logger.info(f"Tulu dataset loaded with {len(dataset)} samples")
     return dataset
 
 
 def preprocess_tulu_dataset(dataset, tokenizer, max_length=2048):
-    """预处理 Tulu: 多轮对话拼成 Instruction/Response 模板"""
-    def format_and_tokenize(examples):
-        all_input_ids, all_labels = [], []
+    """预处理 Tulu: 逐消息 tokenize 后拼接 input_ids/labels/attention_mask"""
+    def process_one(messages):
+        input_ids, labels = [], []
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "").strip()
+            if role == "user":
+                prefix = f"### Instruction:\n{content}\n\n### Response:\n"
+                p_ids = tokenizer(prefix, add_special_tokens=(len(input_ids) == 0))["input_ids"]
+                input_ids.extend(p_ids)
+                labels.extend([-100] * len(p_ids))
+            elif role == "assistant":
+                resp_text = f"{content}\n"
+                r_ids = tokenizer(resp_text, add_special_tokens=False)["input_ids"]
+                input_ids.extend(r_ids)
+                labels.extend(r_ids)
+
+        # 加 EOS
+        eos_id = tokenizer.eos_token_id
+        input_ids.append(eos_id)
+        labels.append(eos_id)
+
+        # 截断或填充到 max_length
+        if len(input_ids) > max_length:
+            input_ids = input_ids[:max_length]
+            labels = labels[:max_length]
+        attn_mask = [1] * len(input_ids)
+        while len(input_ids) < max_length:
+            input_ids.append(tokenizer.pad_token_id or 0)
+            labels.append(-100)
+            attn_mask.append(0)
+
+        return {"input_ids": input_ids, "attention_mask": attn_mask, "labels": labels}
+
+    def mapper(examples):
+        results = {"input_ids": [], "attention_mask": [], "labels": []}
         for messages in examples["messages"]:
-            # 构建文本
-            text_parts = []
-            label_parts = []  # True for assistant tokens
-            for msg in messages:
-                role = msg.get("role", "")
-                content = msg.get("content", "")
-                if role == "user":
-                    text_parts.append(f"### Instruction:\n{content.strip()}\n\n")
-                elif role == "assistant":
-                    text_parts.append(f"### Response:\n{content.strip()}\n")
-                else:
-                    continue
-                label_parts.append(role == "assistant")
+            row = process_one(messages)
+            for k in results:
+                results[k].append(row[k])
+        return results
 
-            full_text = "".join(text_parts) + tokenizer.eos_token
-
-            # tokenize
-            tokenized = tokenizer(full_text, truncation=True, max_length=max_length, padding="max_length")
-            input_ids = tokenized["input_ids"]
-            label = [-100] * len(input_ids)
-
-            # 逐段对齐 label
-            pos = 0
-            for part_idx, part_text in enumerate(text_parts):
-                part_ids = tokenizer(part_text, truncation=True, max_length=max_length, add_special_tokens=False)["input_ids"]
-                part_len = len(part_ids)
-                if label_parts[part_idx]:
-                    for j in range(part_len):
-                        if pos + j < len(label) and input_ids[pos + j] != tokenizer.pad_token_id:
-                            label[pos + j] = input_ids[pos + j]
-                pos += part_len
-                if pos >= max_length:
-                    break
-            # EOS token label
-            if pos < len(label) and input_ids[pos] != tokenizer.pad_token_id:
-                label[pos] = input_ids[pos]
-
-            all_input_ids.append(input_ids)
-            all_labels.append(label)
-
-        return {"input_ids": all_input_ids, "attention_mask": tokenized["attention_mask"], "labels": all_labels}
-
-    dataset = dataset.map(format_and_tokenize, batched=True, remove_columns=dataset.column_names)
+    dataset = dataset.map(mapper, batched=True, remove_columns=dataset.column_names)
     return dataset
 
 
