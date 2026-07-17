@@ -178,6 +178,7 @@ def main():
         bf16=tc["bf16"],
         optim=tc.get("optim", "adamw_8bit"),
         dataloader_num_workers=tc.get("dataloader_num_workers", 4),
+        max_steps=tc.get("max_steps", -1),
         ddp_find_unused_parameters=False,
         remove_unused_columns=True,
         report_to="wandb" if config.get("wandb") else "none",
@@ -187,6 +188,7 @@ def main():
 
     # ── Create trainer ──
     mc = config["mask"]
+    dgmm_cfg = mc.get("dgmm", {})
     trainer = LAMoGMTTrainer(
         model=model,
         args=training_args,
@@ -194,12 +196,13 @@ def main():
         data_collator=data_collator,
         tokenizer=tokenizer,
         mask_method=mc["method"],
-        mask_global_ratio=mc["global_ratio"],
-        mask_alpha=mc["alpha"],
+        mask_global_ratio=mc.get("global_ratio", 0.0),
+        mask_alpha=mc.get("alpha", 0.0),
         mask_beta1=mc.get("beta1", 0.9),
-        mask_min_ratio=mc.get("min_ratio", 0.05),
-        mask_max_ratio=mc.get("max_ratio", 0.95),
+        mask_min_ratio=mc.get("min_ratio", 0.0),
+        mask_max_ratio=mc.get("max_ratio", 0.0),
         mask_warmup_steps=mc.get("warmup_steps", 0),
+        dgmm_config=dgmm_cfg,
     )
 
     # ── Save config to output dir ──

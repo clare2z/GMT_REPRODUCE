@@ -1,12 +1,7 @@
-# ──────────────────────────────────────
-# General Domain — DGMM Training Config
-# Dataset: Tulu V2
-# Model: LLaMA2-7B
-# ──────────────────────────────────────
-
+# Smoke test: 2 optimizer steps only
 model_name_or_path: "/root/autodl-tmp/model/llama-7b"
 data_path: "/root/autodl-tmp/dataset/tulu-v2-sft-mixture/data/*.parquet"
-output_dir: "/root/autodl-tmp/MGMT/outputs/general_llama2_7b_dgmm"
+output_dir: "/tmp/dgmm_smoke"
 
 model:
   use_flash_attention: false
@@ -21,12 +16,11 @@ mask:
   beta1: 0.9
   min_ratio: 0.0
   max_ratio: 0.0
-  warmup_steps: 500
-  # DGMM 专属参数
+  warmup_steps: 0
   dgmm:
     soft_alpha: 0.0
     late_start: 0
-    keep_update_interval: 20
+    keep_update_interval: 1
     ablate: ""
 
 training:
@@ -38,9 +32,9 @@ training:
   warmup_ratio: 0.03
   weight_decay: 0.0
   max_seq_length: 2048
-  logging_steps: 10
-  save_steps: 5000
-  save_total_limit: 3
+  logging_steps: 1
+  save_steps: 100
+  max_steps: 2
   bf16: true
   gradient_checkpointing: true
   optim: "adamw_8bit"

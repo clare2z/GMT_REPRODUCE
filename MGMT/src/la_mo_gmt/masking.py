@@ -20,7 +20,7 @@ from typing import Dict, List, Optional, Tuple
 _dgmm_instance = None
 
 
-def _get_dgmm(alpha=1.0, warmup_steps=500, keep_update_interval=1):
+def _get_dgmm(dgmm_config=None):
     """Create or reuse DGMMFramework instance"""
     global _dgmm_instance
     if _dgmm_instance is None:
@@ -28,9 +28,13 @@ def _get_dgmm(alpha=1.0, warmup_steps=500, keep_update_interval=1):
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
         from dgmm import DGMMFramework
         device = "cuda" if torch.cuda.is_available() else "cpu"
+        cfg = dgmm_config or {}
         _dgmm_instance = DGMMFramework(
-            warmup_steps=warmup_steps,
-            keep_update_interval=keep_update_interval,
+            warmup_steps=cfg.get("warmup_steps", 500),
+            soft_alpha=cfg.get("soft_alpha", 0.0),
+            late_start=cfg.get("late_start", 0),
+            keep_update_interval=cfg.get("keep_update_interval", 1),
+            ablate=cfg.get("ablate", ""),
             device=device,
         )
     return _dgmm_instance
@@ -124,6 +128,7 @@ def apply_gradient_mask(
     update_importance: bool = True,
     step: int = 0,
     warmup_steps: int = 0,
+    dgmm_config: dict = None,
 ) -> Dict[str, float]:
     """
     Apply gradient masking to model parameters in-place.
@@ -146,7 +151,7 @@ def apply_gradient_mask(
         Stats dict with per-layer mask ratios for logging.
     """
     if method == "dgmm":
-        _dgmm = _get_dgmm(alpha=alpha, warmup_steps=warmup_steps)
+        _dgmm = _get_dgmm(dgmm_config or {})
         grads_dict = {name: p.grad.detach().clone() for name, p in named_params if p.grad is not None and p.requires_grad}
         if grads_dict:
             masked, info = _dgmm.apply_mask(grads_dict)

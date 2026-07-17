@@ -21,11 +21,12 @@ class LAMoGMTTrainer(Trainer):
         self,
         mask_method: str = "none",
         mask_global_ratio: float = 0.3,
-        mask_alpha: float = 1.0,                #层自适应分配时的控制参数
-        mask_beta1: float = 0.9,                #历史梯度占比
+        mask_alpha: float = 1.0,
+        mask_beta1: float = 0.9,
         mask_min_ratio: float = 0.05,
         mask_max_ratio: float = 0.95,
         mask_warmup_steps: int = 0,
+        dgmm_config: dict = None,
         *args,
         **kwargs,
     ):
@@ -36,6 +37,7 @@ class LAMoGMTTrainer(Trainer):
         self.mask_min_ratio = mask_min_ratio
         self.mask_max_ratio = mask_max_ratio
         self.mask_warmup_steps = mask_warmup_steps
+        self.dgmm_config = dgmm_config or {}
         self._mask_opt: Optional[GradientMaskOptimizer] = None
         self._log_file = None
         self._start_time = time.time()
@@ -60,6 +62,7 @@ class LAMoGMTTrainer(Trainer):
             min_mask_ratio=self.mask_min_ratio,
             max_mask_ratio=self.mask_max_ratio,
             warmup_steps=self.mask_warmup_steps,
+            dgmm_config=self.dgmm_config,
         )
         # CRITICAL: replace self.optimizer so Trainer uses our wrapper
         self.optimizer = self._mask_opt

@@ -30,6 +30,7 @@ class GradientMaskOptimizer(torch.optim.Optimizer):
         min_mask_ratio: float = 0.05,
         max_mask_ratio: float = 0.95,
         warmup_steps: int = 0,
+        dgmm_config: dict = None,
     ):
         self.base_optimizer = base_optimizer
         self.named_params = named_params
@@ -40,6 +41,7 @@ class GradientMaskOptimizer(torch.optim.Optimizer):
         self.min_mask_ratio = min_mask_ratio
         self.max_mask_ratio = max_mask_ratio
         self.warmup_steps = warmup_steps
+        self.dgmm_config = dgmm_config or {}
 
         # Per-parameter FP32 EMA buffers for momentum-based methods
         # Keyed by id(param), only created when needed
@@ -65,6 +67,7 @@ class GradientMaskOptimizer(torch.optim.Optimizer):
             update_importance=True,
             step=self._step_count,
             warmup_steps=self.warmup_steps,
+            dgmm_config=self.dgmm_config,
         )
         self._last_stats = stats
 
