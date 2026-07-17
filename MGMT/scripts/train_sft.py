@@ -221,6 +221,9 @@ def main():
 
     # ── Save final model ──
     if tc.get("save_final_model", True):
+        logger.info(f"Training complete! Model saved to {final_path}")
+    else:
+        logger.info("Training complete! Final model saving skipped.")
         final_path = os.path.join(config["output_dir"], "final")
         trainer.save_model(final_path)
         tokenizer.save_pretrained(final_path)
@@ -238,7 +241,10 @@ def main():
         for i in range(torch.cuda.device_count()):
             logger.info(f"GPU {i} peak: {torch.cuda.max_memory_allocated(i)/1e9:.1f} GB")
 
-    logger.info(f"Training complete! Model saved to {final_path}")
+    if tc.get("save_final_model", True):
+        logger.info(f"Training complete! Model saved to {final_path}")
+    else:
+        logger.info("Training complete! Final model saving skipped.")
 
 
 if __name__ == "__main__":

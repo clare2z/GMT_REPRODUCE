@@ -1,5 +1,5 @@
 # Smoke test: 2 optimizer steps only
-model_name_or_path: "/root/autodl-tmp/model/llama-7b"
+model_name_or_path: "/root/autodl-tmp/model/Llama-2-7b"
 data_path: "/root/autodl-tmp/dataset/tulu-v2-sft-mixture"
 output_dir: "/root/autodl-tmp/DGMM_smoke"
 
