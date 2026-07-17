@@ -5,7 +5,7 @@
 # ──────────────────────────────────────
 
 model_name_or_path: "/root/autodl-tmp/model/llama-7b"
-data_path: "/root/autodl-tmp/dataset/tulu-v2-sft-mixture/data/*.parquet"
+data_path: "/root/autodl-tmp/dataset/tulu-v2-sft-mixture"
 output_dir: "/root/autodl-tmp/MGMT/outputs/general_llama2_7b_dgmm"
 
 model:

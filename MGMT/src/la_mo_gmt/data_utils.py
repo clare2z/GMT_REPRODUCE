@@ -237,6 +237,14 @@ def _get_prompt_func(template_name: str):
 
 def _load_dataset(path: str, split: str) -> Dataset:
     """Load dataset from local path or HuggingFace hub. Supports glob patterns."""
+    # Detect HuggingFace Arrow Dataset (load_from_disk format)
+    if os.path.isdir(path) and (os.path.exists(os.path.join(path, "state.json")) or os.path.exists(os.path.join(path, "dataset_info.json"))):
+        from datasets import load_from_disk
+        ds = load_from_disk(path)
+        if isinstance(ds, dict):
+            ds = ds.get(split, list(ds.values())[0])
+        return ds
+
     expanded = path
     if "*" in path or "?" in path:
         expanded = sorted(glob_mod.glob(path))
