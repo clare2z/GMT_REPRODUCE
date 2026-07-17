@@ -1,7 +1,7 @@
 # Smoke test: 2 optimizer steps only
 model_name_or_path: "/root/autodl-tmp/model/llama-7b"
 data_path: "/root/autodl-tmp/dataset/tulu-v2-sft-mixture"
-output_dir: "/tmp/dgmm_smoke"
+output_dir: "/root/autodl-tmp/DGMM_smoke"
 
 model:
   use_flash_attention: false
@@ -35,6 +35,8 @@ training:
   logging_steps: 1
   save_steps: 100
   max_steps: 2
+  save_strategy: "no"
+  save_final_model: false
   bf16: true
   gradient_checkpointing: true
   optim: "adamw_8bit"

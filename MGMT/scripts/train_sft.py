@@ -178,6 +178,7 @@ def main():
         bf16=tc["bf16"],
         optim=tc.get("optim", "adamw_8bit"),
         dataloader_num_workers=tc.get("dataloader_num_workers", 4),
+        save_strategy=tc.get("save_strategy", "steps"),
         max_steps=tc.get("max_steps", -1),
         ddp_find_unused_parameters=False,
         remove_unused_columns=True,
@@ -218,9 +219,10 @@ def main():
     trainer.train(resume_from_checkpoint=resume)
 
     # ── Save final model ──
-    final_path = os.path.join(config["output_dir"], "final")
-    trainer.save_model(final_path)
-    tokenizer.save_pretrained(final_path)
+    if tc.get("save_final_model", True):
+        final_path = os.path.join(config["output_dir"], "final")
+        trainer.save_model(final_path)
+        tokenizer.save_pretrained(final_path)
 
     # ── Save training summary ──
     summary = trainer.get_summary()
