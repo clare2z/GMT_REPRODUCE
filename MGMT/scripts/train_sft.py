@@ -163,6 +163,7 @@ def main():
 
     # ── Training arguments ──
     tc = config["training"]
+    logger.info(f"DEBUG: save_strategy={tc.get('save_strategy','steps')} max_steps={tc.get('max_steps',-1)} save_final_model={tc.get('save_final_model',True)}")
     training_args = TrainingArguments(
         output_dir=config["output_dir"],
         num_train_epochs=tc["num_epochs"],
