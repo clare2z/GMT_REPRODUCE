@@ -75,7 +75,8 @@ LOCAL_PATHS = {
     "mistralai/Mistral-7B-v0.1": "/root/autodl-tmp/model/Mistral-7B-v0.1",
     "deepseek-ai/DeepSeek-Coder-Base-6.7B": "/root/autodl-tmp/model/deepseek-coder-6.7b-base",
     "LLM-Research/llama-2-7b": "/root/autodl-tmp/model/Llama-2-7b",
-    "dataset": "/root/autodl-tmp/dataset/Magicoder-Evol-Instruct-110K"
+    "dataset": "/root/autodl-tmp/dataset/Magicoder-Evol-Instruct-110K",
+    "tulu": "/root/autodl-tmp/dataset/tulu-v2-sft-mixture"
 }
 
 
@@ -134,6 +135,69 @@ def preprocess_dataset(dataset, tokenizer, max_length=256):
         return tokenized
 
     dataset = dataset.map(format_and_tokenize, batched=True, remove_columns=["instruction", "response"])
+    return dataset
+
+
+def load_tulu_dataset():
+    logger.info("Loading Tulu V2 SFT Mixture dataset...")
+    tulu_path = LOCAL_PATHS.get("tulu", "")
+    if os.path.exists(tulu_path):
+        dataset = load_dataset(tulu_path, split="train")
+    else:
+        logger.info(f"Local path not found: {tulu_path}, downloading from Hugging Face...")
+        dataset = load_dataset("allenai/tulu-v2-sft-mixture", split="train")
+    logger.info(f"Tulu dataset loaded with {len(dataset)} samples")
+    return dataset
+
+
+def preprocess_tulu_dataset(dataset, tokenizer, max_length=2048):
+    """预处理 Tulu: 多轮对话拼成 Instruction/Response 模板"""
+    def format_and_tokenize(examples):
+        all_input_ids, all_labels = [], []
+        for messages in examples["messages"]:
+            # 构建文本
+            text_parts = []
+            label_parts = []  # True for assistant tokens
+            for msg in messages:
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+                if role == "user":
+                    text_parts.append(f"### Instruction:\n{content.strip()}\n\n")
+                elif role == "assistant":
+                    text_parts.append(f"### Response:\n{content.strip()}\n")
+                else:
+                    continue
+                label_parts.append(role == "assistant")
+
+            full_text = "".join(text_parts) + tokenizer.eos_token
+
+            # tokenize
+            tokenized = tokenizer(full_text, truncation=True, max_length=max_length, padding="max_length")
+            input_ids = tokenized["input_ids"]
+            label = [-100] * len(input_ids)
+
+            # 逐段对齐 label
+            pos = 0
+            for part_idx, part_text in enumerate(text_parts):
+                part_ids = tokenizer(part_text, truncation=True, max_length=max_length, add_special_tokens=False)["input_ids"]
+                part_len = len(part_ids)
+                if label_parts[part_idx]:
+                    for j in range(part_len):
+                        if pos + j < len(label) and input_ids[pos + j] != tokenizer.pad_token_id:
+                            label[pos + j] = input_ids[pos + j]
+                pos += part_len
+                if pos >= max_length:
+                    break
+            # EOS token label
+            if pos < len(label) and input_ids[pos] != tokenizer.pad_token_id:
+                label[pos] = input_ids[pos]
+
+            all_input_ids.append(input_ids)
+            all_labels.append(label)
+
+        return {"input_ids": all_input_ids, "attention_mask": tokenized["attention_mask"], "labels": all_labels}
+
+    dataset = dataset.map(format_and_tokenize, batched=True, remove_columns=dataset.column_names)
     return dataset
 
 
@@ -535,6 +599,8 @@ def main():
     parser = argparse.ArgumentParser(description="Unified Training Script")
     parser.add_argument("--algorithm", type=str, required=True,
                         choices=list(TRAINER_MAP.keys()), help="Training algorithm")
+    parser.add_argument("--dataset", type=str, default="magicoder",
+                        choices=["magicoder", "tulu"], help="训练数据集")
     parser.add_argument("--model_name", type=str, default="mistralai/Mistral-7B-v0.1")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=1)
@@ -631,9 +697,13 @@ def main():
         model.print_trainable_parameters()
 
     # 2. 加载数据
-    logger.info(">>> [2/4] Loading dataset...")
-    dataset = load_magicoder_dataset(subset=args.subset, no_shuffle=args.no_shuffle, seed=args.seed)
-    preprocessed = preprocess_dataset(dataset, tokenizer, max_length=args.max_length)
+    logger.info(f">>> [2/4] Loading dataset: {args.dataset}")
+    if args.dataset == "tulu":
+        dataset = load_tulu_dataset()
+        preprocessed = preprocess_tulu_dataset(dataset, tokenizer, max_length=args.max_length)
+    else:
+        dataset = load_magicoder_dataset(subset=args.subset, no_shuffle=args.no_shuffle, seed=args.seed)
+        preprocessed = preprocess_dataset(dataset, tokenizer, max_length=args.max_length)
     dataloader = create_dataloader(preprocessed, batch_size=args.batch_size, seed=args.seed)
     logger.info(f">>> [2/4] Dataloader: {len(dataloader)} batches")
 
